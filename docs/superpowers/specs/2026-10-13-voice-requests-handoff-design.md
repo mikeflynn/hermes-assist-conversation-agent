@@ -11,7 +11,7 @@ Extend the existing Home Assistant (HA) voice path so Mike can ask for work beyo
 - HA should continue handling its own device state/control intents before sending unmatched requests to Hermes.
 - Existing calendar and Things cache-backed behavior remains intact.
 - Advanced requests appear in a dedicated **Voice Requests** session in the Hermes app.
-- Voice-originated requests must not perform writes. Mike takes over in Hermes before any state-changing action executes.
+- Voice-originated requests must not perform external/system writes. The explicit exception is Obsidian: voice may read and write within the vault's `Agent` folder and may read (but not write) elsewhere in the vault. Destructive Obsidian actions and writes outside `Agent` require Hermes app follow-up and approval.
 - Future capabilities should be registered through a generic policy/capability mechanism rather than hard-coded into the bridge.
 - Spoken replies should clearly distinguish completed answers, unsupported requests, and work that needs the Hermes session or user approval.
 
@@ -31,7 +31,7 @@ The HA custom conversation integration forwards text to `bridge.py` at `/api/cha
    - **Unsupported:** no registered capability can handle it; the spoken response says so plainly and may offer the Hermes session as the next step.
    - **Unavailable/error:** the handoff or capability failed; the response must not imply success.
 4. The Hermes session stores enough context to pick up the request. Use a persistent session identifier and concise transcript/context; avoid sending unrelated HA history or secrets.
-5. For write-capable work, the voice-originated turn may prepare a proposal but cannot execute the mutation. Mike continues in the Hermes app and explicitly confirms the exact action there. Approval is bound to the displayed operation and parameters, not a generic or ambiguous spoken confirmation.
+5. For write-capable work outside the scoped Obsidian `Agent` exception, the voice-originated turn may prepare a proposal but cannot execute the mutation. Mike continues in the Hermes app and explicitly confirms the exact action there. Approval is bound to the displayed operation and parameters, not a generic or ambiguous spoken confirmation.
 
 ### Capability and policy registry
 
@@ -56,7 +56,8 @@ If the existing Desktop does not surface the required approval event, implement 
 
 - Existing Things/calendar briefs: preserve current behavior.
 - Home Assistant device commands: remain with HA's own intent handling; do not expose additional device-control capability through this voice fallback.
-- Web search and Obsidian reads: candidates for registered read-only capabilities, with Obsidian restricted to the approved vault scope (initially the `Agent` folder).
+- Web search: registered read-only capability.
+- Obsidian: voice may read/write only within the `Agent` folder; voice may read-only access the rest of the vault. Write tools must enforce the path boundary, not merely rely on prompt instructions. Deletion and bulk destructive operations remain approval-gated.
 - Invoice Ninja: begin with read-only lookup. Mutations remain blocked in the voice-originated turn until app takeover/approval. Use a narrowly scoped API credential and verify writes by reading the exact record back after approved execution.
 
 ## Voice response behavior
@@ -73,7 +74,7 @@ Only say a request was handed off after the session write is confirmed. Never de
 ## Security and operational requirements
 
 - Voice-originated tools are allowlisted; no inherited full CLI defaults. Exclude terminal, arbitrary code execution, broad filesystem writes, and HA control from the voice path unless a future reviewed policy explicitly changes scope.
-- Obsidian access is read-only and path-scoped. Invoice Ninja reads/writes use separate least-privilege credentials where supported.
+- Obsidian access is path-scoped: read/write in `Agent`, read-only elsewhere, and destructive operations approval-gated. Enforce this in the tool/adapter itself. Invoice Ninja reads/writes use separate least-privilege credentials where supported.
 - Keep API keys out of prompts, logs, and speech. Authenticate bridge-to-Hermes API calls; bind services to trusted interfaces and use TLS/access controls when traffic crosses an untrusted network.
 - Preserve request IDs and use idempotency/deduplication for handoffs and later writes to prevent retries from creating duplicate records.
 - Bound request length, history, concurrency, and runtime. Ensure truncation cannot remove the user's current request while retaining stale history.
@@ -88,8 +89,9 @@ Only say a request was handed off after the session write is confirmed. Never de
 ## Verification and acceptance criteria
 
 - HA device intents and current Things/calendar responses still take their existing paths.
-- A registered read-only request (web search, then Obsidian read) is handled without enabling mutating tools in the voice path.
+- A registered web-search request and Obsidian reads succeed through voice; voice can create/update notes only inside `Agent`, and cannot write elsewhere in the vault.
 - A request for an Invoice Ninja create/update is handed off; the record remains unchanged until Mike takes over and confirms in Hermes.
+- Destructive Obsidian operations and writes outside `Agent` are handed off; ordinary note reads and scoped `Agent` note creates/updates work by voice.
 - The dedicated session is visible and continuable in the installed Hermes Desktop; pending approval behavior is tested, not assumed.
 - Unsupported requests, API outages, timeouts, and failed handoffs produce truthful spoken responses and never claim completion.
 - Adding a capability backed by an already registered tool requires policy/config registration but no bridge-specific feature branch.
