@@ -102,14 +102,16 @@
 - Test: `tests/test_voice_config.py`
 
 **Interfaces:**
-- Document environment/config inputs: API base URL, API key source, capability registry path, state path, request timeout, and explicitly allowed API-server tools. The API-server platform selection must be explicit and include Hermes' `no_mcp` sentinel; never rely on the API toolsets endpoint alone to report default MCP servers.
-- Default configuration denies optional tools and writes; `Agent`-scoped Obsidian access is added only by its separate plan.
+- Use `HERMES_API_URL` and `HERMES_API_KEY` (secret) from the bridge environment. Accept HTTP/HTTPS only for `localhost` or a literal loopback IP; reject URL userinfo, query, or fragment. Use `HERMES_API_TIMEOUT_SECONDS` (default `10`, integer range `1..30`).
+- Use `HERMES_VOICE_STATE_PATH`; default to `$HERMES_HOME/voice_requests_state.json`, falling back to `~/.hermes/voice_requests_state.json` only when `HERMES_HOME` is unset. Use optional `HERMES_VOICE_POLICY_FILE`; absent means an empty optional-tool registry, present-but-unreadable or malformed fails closed via `VoicePolicy.from_file`.
+- Read `platform_toolsets.api_server` from the same active Hermes home/profile through a read-only Hermes config interface. Require an explicit list containing `no_mcp`; if config lookup fails, is malformed, or omits the sentinel, do not construct the live API client. The authenticated concrete tool inventory must still exactly match `VoicePolicy.allowed_tools()` before each run; the endpoint alone cannot prove MCP is disabled.
+- Default configuration denies optional tools and writes; `Agent`-scoped Obsidian access is added only by its separate plan. This task must not edit Hermes runtime configuration, start the API server, or create credentials.
 
-- [ ] **Step 1: Write failing config tests** for missing API credentials, unsafe/broad tool selections, missing `no_mcp`, unknown registry entries, and invalid timeouts.
+- [ ] **Step 1: Write failing config tests** for missing API credentials, non-loopback URLs, URL userinfo/query/fragment, unsafe/broad tool selections, missing or unreadable `no_mcp` config, unknown registry entries, invalid timeouts, and profile-safe default state/policy paths.
 - [ ] **Step 2: Run `python3 -m unittest discover -s tests -p 'test_voice_config.py' -v`** and verify the tests fail because configuration validation is absent.
 - [ ] **Step 3: Implement fail-closed configuration validation** and document secure local setup. Do not commit secrets or overwrite existing README edits; patch only the relevant section.
 - [ ] **Step 4: Run all tests and `git diff --check`**; inspect the diff to confirm the pre-existing `README.md` and `bridge.py` changes remain intact.
-- [ ] **Step 5: Verify manually** that the API-server tool inventory excludes disallowed tools and the effective config contains `no_mcp` so globally enabled MCP servers cannot be inherited; use a harmless approval-gated test tool to confirm pending approval reaches Desktop, or confirm the proposal-only fallback. Verify HA device commands and calendar/Things requests retain their existing paths; verify API-down and unsupported requests produce the right spoken replies.
+- [ ] **Step 5: Run read-only/manual compatibility checks only against an already-running loopback API server whose same-profile config already includes `no_mcp`.** Verify tool inventory, session visibility/continuation, pending-approval or proposal-only behavior, and that HA device commands, calendar/Things, API-down, and unsupported paths retain expected behavior. Do not enable/configure/start the API server or invoke an approval-gated tool; if no pre-existing safe server exists, record the live gate as blocked pending user authorization.
 - [ ] **Step 6: Commit** as `docs: configure voice request handoff`.
 
 ## Exit gate
