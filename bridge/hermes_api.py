@@ -64,6 +64,22 @@ class HermesApiClient:
             if not isinstance(item,dict) or (item.get('method'),item.get('path')) != expected: raise HermesApiError('invalid capabilities response')
         return data
 
+    def get_enabled_tool_inventory(self):
+        data = self._request('GET', '/v1/toolsets')
+        entries = data.get('toolsets')
+        if data.get('object') != 'hermes.api_server.toolsets' or not isinstance(entries, list):
+            raise HermesApiError('invalid tool inventory response')
+        tools = set()
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get('name'), str) or not entry['name'] or not isinstance(entry.get('enabled'), bool):
+                raise HermesApiError('invalid tool inventory response')
+            names = entry.get('tools')
+            if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names) or len(set(names)) != len(names):
+                raise HermesApiError('invalid tool inventory response')
+            if entry['enabled']:
+                tools.update(names)
+        return frozenset(tools)
+
     def get_or_create_voice_session(self, state_path):
         state=VoiceState(state_path)
         self._voice_state=state

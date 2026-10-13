@@ -13,3 +13,13 @@
   - `git diff --check` — clean.
 - Remaining external gate: Task 4 must verify the running API server's explicit restricted tool inventory and desktop/session behavior before live handoffs are enabled. No claim is made that a live handoff currently activates.
 - Product commit SHA: `2cfd75d9693c10ec4970dbcd1ad8cbc7ff548424` (`fix: close voice routing safety gaps`).
+
+## Fix round 1/5 — review findings
+
+- Added a runtime `HermesApiClient` from `HERMES_API_URL` and `HERMES_API_KEY`; absent inputs leave the client unavailable. Before every non-cache run, route now performs authenticated capability discovery and a strict enabled concrete-tool inventory query, requiring exact equality with `VoicePolicy.allowed_tools()`. Empty policy permits only a no-tools run; inventory mismatch/malformed/API errors prevent session run submission. No live endpoint or credentials were used.
+- Added `get_enabled_tool_inventory() -> frozenset[str]` with strict shape/name checks and disposable fake HTTP-server coverage.
+- Bounded local confirmed-outcome dedupe to 512 entries/300 seconds and keyed by canonical state path plus request ID, text, and context. Failures are not cached. Generated IDs digest canonical conversation ID, bounded history, and utterance; explicit incoming IDs remain respected. Task 2's session-scoped server idempotency remains the authority for ambiguous retries.
+- Actual submit includes current utterance separately as `text` and enforces it in bounded submitted history/context. Handoff still requires accepted status and matching session ID; error speech stays generic.
+- TDD RED: new API inventory tests failed because the method was absent; bridge tests exposed the disabled-empty-registry route, cross-state outcome reuse, missing request-ID derivation, and absent context at submit boundary. GREEN after implementation.
+- Verification: `test_voice_responses.py` — 2 passed; `test_bridge.py` — 12 passed; `test_hermes_api.py` — 14 passed; full `python3 -m unittest discover -s tests -v` — 43 passed; `git diff --check` — clean. Python 3.9 `py_compile` passed. Test teardown emitted a benign socket ResourceWarning; suite exit was successful.
+- Remaining external gate: Task 4 must configure/verify `no_mcp` explicitly before any live tool-enabled handoff. This change does not configure runtime Hermes or claim live handoff availability.

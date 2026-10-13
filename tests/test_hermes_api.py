@@ -11,12 +11,15 @@ class FakeHandler(BaseHTTPRequestHandler):
     idempotency = {}
     mode = 'ok'
     caps = None
+    inventory = None
     def log_message(self, *args): pass
     def _reply(self, status, obj):
         data = json.dumps(obj).encode()
         self.send_response(status); self.send_header('Content-Type','application/json'); self.end_headers(); self.wfile.write(data)
     def do_GET(self):
         type(self).calls.append(('GET', self.path, self.headers.get('Authorization')))
+        if self.path == '/v1/toolsets':
+            return self._reply(200, type(self).inventory or {'object':'hermes.api_server.toolsets','toolsets':[]})
         self._reply(200, type(self).caps or {'object':'hermes.api_server.capabilities','features':{'run_submission':True,'runs_idempotency':{'supported':True}},'endpoints':{'session_create':{'method':'POST','path':'/api/sessions'},'runs':{'method':'POST','path':'/v1/runs'}}})
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('Content-Length',0)))
@@ -43,6 +46,14 @@ class ApiTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): cls.server.shutdown(); cls.thread.join()
     def setUp(self): FakeHandler.calls=[]; FakeHandler.idempotency={}; FakeHandler.mode='ok'; FakeHandler.caps=None; self.client=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
+    def test_enabled_tool_inventory_returns_concrete_enabled_tools(self):
+        FakeHandler.inventory={'object':'hermes.api_server.toolsets','toolsets':[{'name':'calendar','enabled':True,'tools':['calendar_list','calendar_get']},{'name':'unused','enabled':False,'tools':['danger']}]}
+        self.assertEqual(self.client.get_enabled_tool_inventory(),frozenset(('calendar_list','calendar_get')))
+        call=FakeHandler.calls[-1]; self.assertEqual(call[1],'/v1/toolsets'); self.assertEqual(call[2],'Bearer test-secret')
+
+    def test_enabled_tool_inventory_rejects_malformed(self):
+        FakeHandler.inventory={'object':'hermes.api_server.toolsets','toolsets':[{'name':'x','enabled':True,'tools':'unknown'}]}
+        with self.assertRaises(HermesApiError): self.client.get_enabled_tool_inventory()
     def test_authenticates_discovers_caps_and_creates_then_reuses_session(self):
         import tempfile, os
         with tempfile.TemporaryDirectory() as d:

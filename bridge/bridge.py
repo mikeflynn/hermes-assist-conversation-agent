@@ -20,11 +20,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 import hashlib
+from collections import OrderedDict
 
 from .voice_responses import VoiceOutcome, format_spoken_reply
 from .voice_policy import VoicePolicy
 
-_HANDOFF_CACHE: dict[str, VoiceOutcome] = {}
+_HANDOFF_CACHE: OrderedDict[str, tuple[float, VoiceOutcome]] = OrderedDict()
+HANDOFF_CACHE_TTL = 300
+HANDOFF_CACHE_MAX = 512
 VOICE_POLICY = VoicePolicy(())
 _HANDOFF_LOCK = threading.Lock()
 MAX_REQUEST_CHARS = 6000
@@ -175,20 +178,31 @@ def build_voice_context(current_text: str, history: str) -> str:
 def handoff_request(client, state_path: str, request_id: str, text: str, context: str) -> VoiceOutcome:
     if not request_id or len(text) > MAX_REQUEST_CHARS:
         return VoiceOutcome("unsupported", "I can't do that from the voice assistant. I haven't taken action.", request_id)
-    key = hashlib.sha256((request_id + "\\0" + text).encode("utf-8")).hexdigest()
+    key = hashlib.sha256(json.dumps([str(Path(state_path).expanduser().resolve()), request_id, text, context], ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
     with _HANDOFF_LOCK:
+        now = time.monotonic()
+        for old_key, (created, _) in list(_HANDOFF_CACHE.items()):
+            if now - created > HANDOFF_CACHE_TTL:
+                del _HANDOFF_CACHE[old_key]
         cached = _HANDOFF_CACHE.get(key)
         if cached is not None:
-            return cached
+            _HANDOFF_CACHE.move_to_end(key)
+            return cached[1]
         if not MAX_CONCURRENT_HANDOFFS.acquire(False):
             return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
         try:
             session_id = client.get_or_create_voice_session(state_path)
-            result = client.submit_voice_request(session_id, request_id, text, {"source": "voice", "history": (context or "")[-MAX_CONTEXT_CHARS:]})
+            bounded_context = (context or "")[-MAX_CONTEXT_CHARS:]
+            if text not in bounded_context:
+                bounded_context = (bounded_context + "\nUser said: " + text[:MAX_REQUEST_CHARS])[-MAX_CONTEXT_CHARS:]
+            result = client.submit_voice_request(session_id, request_id, text, {"source": "voice", "history": bounded_context})
             if getattr(result, "status", None) != "accepted" or getattr(result, "session_id", None) != session_id:
                 return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
             outcome = VoiceOutcome("handed_off", "I sent that to your Voice Requests session.", request_id, session_id)
-            _HANDOFF_CACHE[key] = outcome
+            _HANDOFF_CACHE[key] = (now, outcome)
+            _HANDOFF_CACHE.move_to_end(key)
+            while len(_HANDOFF_CACHE) > HANDOFF_CACHE_MAX:
+                _HANDOFF_CACHE.popitem(last=False)
             return outcome
         except Exception:
             return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
@@ -197,9 +211,20 @@ def handoff_request(client, state_path: str, request_id: str, text: str, context
 
 
 def get_voice_client():
-    # Task 4 must verify an explicit restricted server tool inventory before
-    # enabling live API traffic. Environment configuration alone is not proof.
-    return None
+    base_url = os.environ.get("HERMES_API_URL", "").strip()
+    api_key = os.environ.get("HERMES_API_KEY", "").strip()
+    if not base_url or not api_key:
+        return None
+    try:
+        from .hermes_api import HermesApiClient
+        return HermesApiClient(base_url, api_key)
+    except Exception:
+        return None
+
+
+def derive_request_id(conversation_id: str, text: str, history: str) -> str:
+    canonical = json.dumps([conversation_id or "", (history or "")[-MAX_CONTEXT_CHARS:], text[:MAX_REQUEST_CHARS]], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _cached_brief(text: str, calendar_path: str, things_path: str, news_path: str) -> VoiceOutcome | None:
@@ -225,9 +250,16 @@ def route_voice_request(text: str, client, policy: VoicePolicy, calendar_path: s
     cached = _cached_brief(text, calendar_path, things_path, news_path)
     if cached is not None:
         return cached
-    if not policy.authorize("voice_handoff", "hermes_api", "read", None):
+    if policy.allowed_tools() and not policy.authorize("voice_handoff", "hermes_api", "read", None):
         return VoiceOutcome("unsupported", "I can't do that from the voice assistant. I haven't taken action.", request_id)
     if client is None:
+        return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+    try:
+        client.get_capabilities()
+        inventory = client.get_enabled_tool_inventory()
+        if inventory != policy.allowed_tools():
+            return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+    except Exception:
         return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
     return handoff_request(client, os.environ.get("HERMES_VOICE_STATE_PATH", str(Path.home() / ".hermes" / "voice_requests_state.json")), request_id, text, context)
 
@@ -354,7 +386,7 @@ class Handler(BaseHTTPRequestHandler):
             outcome = VoiceOutcome("unsupported", "That request is too long for the voice assistant. I haven't taken action.")
             json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "conversation_id": conversation_id or None})
             return
-        request_id = str(data.get("request_id") or hashlib.sha256((conversation_id + "\\0" + text).encode("utf-8")).hexdigest())
+        request_id = str(data.get("request_id") or derive_request_id(conversation_id, text, history))
         outcome = route_voice_request(text, get_voice_client(), VOICE_POLICY, CALENDAR_BRIEF_PATH, THINGS_BRIEF_PATH, request_id, format_history(data, text), NEWS_BRIEF_PATH)
         json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "request_id": outcome.request_id, "session_id": outcome.session_id, "conversation_id": conversation_id or None})
         return
