@@ -19,6 +19,15 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+import hashlib
+
+from .voice_responses import VoiceOutcome, format_spoken_reply
+
+_HANDOFF_CACHE: dict[str, VoiceOutcome] = {}
+_HANDOFF_LOCK = threading.Lock()
+MAX_REQUEST_CHARS = 6000
+MAX_CONTEXT_CHARS = 12000
+MAX_CONCURRENT_HANDOFFS = threading.BoundedSemaphore(4)
 
 HOST = os.environ.get("HERMES_ASSIST_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HERMES_ASSIST_PORT", "8765"))
@@ -157,6 +166,42 @@ def format_history(data: dict[str, Any], current_text: str) -> str:
     return "Recent conversation, oldest to newest:\n" + "\n".join(lines[-MAX_HISTORY_MESSAGES:]) + "\n"
 
 
+def build_voice_context(current_text: str, history: str) -> str:
+    return (history or "")[-MAX_CONTEXT_CHARS:] + "\nUser said: " + current_text[:MAX_REQUEST_CHARS]
+
+
+def handoff_request(client, state_path: str, request_id: str, text: str, context: str) -> VoiceOutcome:
+    if not request_id or len(text) > MAX_REQUEST_CHARS:
+        return VoiceOutcome("unsupported", "I can't do that from the voice assistant. I haven't taken action.", request_id)
+    key = hashlib.sha256((request_id + "\\0" + text).encode("utf-8")).hexdigest()
+    with _HANDOFF_LOCK:
+        cached = _HANDOFF_CACHE.get(key)
+        if cached is not None:
+            return cached
+        if not MAX_CONCURRENT_HANDOFFS.acquire(False):
+            return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+        try:
+            session_id = client.get_or_create_voice_session(state_path)
+            result = client.submit_voice_request(session_id, request_id, text, {"source": "voice", "history": (context or "")[-MAX_CONTEXT_CHARS:]})
+            if getattr(result, "status", None) != "accepted" or getattr(result, "session_id", None) != session_id:
+                return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+            outcome = VoiceOutcome("handed_off", "I sent that to your Voice Requests session.", request_id, session_id)
+            _HANDOFF_CACHE[key] = outcome
+            return outcome
+        except Exception:
+            return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+        finally:
+            MAX_CONCURRENT_HANDOFFS.release()
+
+
+def get_voice_client():
+    base_url, api_key = os.environ.get("HERMES_API_BASE_URL", ""), os.environ.get("HERMES_API_KEY", "")
+    if not base_url or not api_key:
+        return None
+    from .hermes_api import HermesApiClient
+    return HermesApiClient(base_url, api_key, TIMEOUT)
+
+
 def get_agent():
     """Create one in-process Hermes agent and reuse it across voice requests."""
     global _AGENT, _AGENT_READY, _AGENT_ERROR
@@ -274,6 +319,19 @@ class Handler(BaseHTTPRequestHandler):
         device_id = str(data.get("device_id") or "")
         extra_system_prompt = str(data.get("extra_system_prompt") or "")
         history = format_history(data, text)
+
+        if len(text) > MAX_REQUEST_CHARS:
+            outcome = VoiceOutcome("unsupported", "That request is too long for the voice assistant. I haven't taken action.")
+            json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "conversation_id": conversation_id or None})
+            return
+        request_id = str(data.get("request_id") or hashlib.sha256((conversation_id + "\\0" + text).encode("utf-8")).hexdigest())
+        client = get_voice_client()
+        if client is None:
+            outcome = VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+        else:
+            outcome = handoff_request(client, os.environ.get("HERMES_VOICE_STATE_PATH", str(Path.home() / ".hermes" / "voice_requests_state.json")), request_id, text, format_history(data, text))
+        json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "request_id": outcome.request_id, "session_id": outcome.session_id, "conversation_id": conversation_id or None})
+        return
 
         prompt = (
             f"{SYSTEM_PROMPT}\n"
