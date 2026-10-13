@@ -1,6 +1,6 @@
 # Voice Requests bridge: secure setup
 
-The Voice Requests handoff is optional and fails closed. The bridge constructs its API client only when credentials and a valid loopback URL are present, the active Hermes profile explicitly lists `no_mcp` in `platform_toolsets.api_server`, and any supplied capability registry is readable and valid. Before each run it also compares the authenticated concrete enabled-tool inventory with the registry's enabled tools. An empty/missing registry grants no optional tools; the API endpoint does not prove that MCP is disabled.
+The Voice Requests handoff is optional and fails closed. The bridge constructs its API client only when credentials and a valid loopback URL are present, the active Hermes profile explicitly configures exactly the one-item list `["no_mcp"]` in `platform_toolsets.api_server`, and any supplied capability registry is readable and valid. Additional toolsets—including broad composites such as `hermes-api-server` or `terminal`—disable client construction. Before each run it also compares the authenticated concrete enabled-tool inventory with the registry's enabled tools. An empty/missing registry grants no optional tools; the API endpoint does not prove MCP is disabled.
 
 ## Prepare Hermes in the intended profile
 
@@ -13,7 +13,7 @@ hermes config get --json platform_toolsets.api_server
 hermes config get gateway.api_server.enabled
 ```
 
-The first command must return a JSON list containing `no_mcp`; an unset, malformed, or unreadable value prevents client construction. The bridge uses the `hermes` executable found on its `PATH` and inherits the service environment/profile. Ensure those identify the intended Hermes installation and profile. Do not use `hermes config show` in shared logs because configuration output can contain sensitive values.
+The first command must return exactly the JSON list `["no_mcp"]`; an unset, malformed, or unreadable value, or any additional toolset, prevents client construction. The bridge uses the `hermes` executable found on its `PATH` and inherits the service environment/profile. Ensure those identify the intended Hermes installation and profile. Do not use `hermes config show` in shared logs because configuration output can contain sensitive values.
 
 Only an authorized operator should apply Hermes API-server configuration or start it. Choose loopback binding and current supported auth settings from Hermes documentation; do not expose the API server to a LAN or the internet. Verify the profile/configuration first, then independently confirm the authenticated concrete API tool inventory is restricted. This repository task does not enable or start that server.
 
@@ -33,7 +33,7 @@ Do not set `HERMES_ASSIST_TOOLSETS` for this API handoff; a non-empty legacy loc
 ## Verify without broadening access
 
 1. Confirm the bridge service's `PATH`, active `HERMES_HOME`/profile, and private environment without displaying secrets.
-2. Run the two read-only config lookups above in that same service environment. Confirm `platform_toolsets.api_server` is an explicit list containing `no_mcp` and the server is enabled only as intended.
+2. Run the two read-only config lookups above in that same service environment. Confirm `platform_toolsets.api_server` is exactly `["no_mcp"]` (no additions) and the server is enabled only as intended.
 3. Confirm the endpoint is loopback-only and authenticated. Use a read-only health/capability/inventory check; do not invoke approval-gated tools.
 4. Verify enabled API tool inventory exactly matches the optional registry before using the voice handoff. Empty policy means no tools are permitted.
 5. Test API-down and unsupported requests; they must report no action was started. Confirm session visibility/continuation and Desktop approval behavior before considering the capability-plan exit gate satisfied.

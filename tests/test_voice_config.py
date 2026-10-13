@@ -27,11 +27,12 @@ class VoiceConfigTests(unittest.TestCase):
             with self.subTest(suffix=suffix), self.env(HERMES_API_URL="http://" + suffix):
                 self.assertIsNone(bridge.get_voice_client())
 
-    def test_requires_explicit_no_mcp_config(self):
-        with self.env(), patch.object(bridge, "_configured_api_toolsets", return_value=None):
-            self.assertIsNone(bridge.get_voice_client())
-        with self.env(), patch.object(bridge, "_configured_api_toolsets", return_value=["filesystem"]):
-            self.assertIsNone(bridge.get_voice_client())
+    def test_requires_exactly_no_mcp_config(self):
+        for toolsets in (None, ["filesystem"], ["no_mcp", "hermes-api-server"], ["no_mcp", "terminal"]):
+            with self.subTest(toolsets=toolsets), self.env(), patch.object(bridge, "_configured_api_toolsets", return_value=toolsets):
+                self.assertIsNone(bridge.get_voice_client())
+        with self.env(), patch.object(bridge, "_configured_api_toolsets", return_value=["no_mcp"]):
+            self.assertIsNotNone(bridge.get_voice_client())
 
     def test_registry_is_empty_by_default_and_unreadable_registry_fails_closed(self):
         with tempfile.TemporaryDirectory() as home, self.env(HERMES_HOME=home):

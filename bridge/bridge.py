@@ -228,7 +228,7 @@ def get_voice_client():
         except ValueError:
             loopback = host.lower() == "localhost"
         configured_toolsets = _configured_api_toolsets()
-        if not loopback or not isinstance(configured_toolsets, list) or "no_mcp" not in configured_toolsets:
+        if not loopback or configured_toolsets != ["no_mcp"]:
             return None
         timeout = int(os.environ.get("HERMES_API_TIMEOUT_SECONDS", "10"))
         if not 1 <= timeout <= 30:
