@@ -41,3 +41,14 @@
 - Product commit: `e912e8d94c0fc2edd2fcf632dfe17f3bbbc32ce1 fix: isolate voice request idempotency by session`.
 - Live Desktop visibility remains unverified/blocked. No API server or configuration was changed; no credentials were created or used, and no live smoke test was performed.
 - Modified this round: `bridge/hermes_api.py`, `tests/test_hermes_api.py`, and this report. No subagents used.
+
+## Fix round 3 — unambiguous composite key
+- Regression test: `test_separator_like_ids_produce_distinct_server_idempotency_keys` submits the ambiguous pairs through the fake HTTP server and asserts distinct `Idempotency-Key` values and two server-side entries. `HandoffResult.request_id` is unchanged.
+- RED command: `python3 -m unittest discover -s tests -p 'test_hermes_api.py' -v`
+- RED output (before implementation): `Ran 12 tests in 0.518s`; `FAILED (errors=1)`. The regression errored with `HermesApiError: Hermes API returned HTTP 409` on its second submission, confirming both pairs mapped to the same server key.
+- GREEN command: `python3 -m unittest discover -s tests -p 'test_hermes_api.py' -v` — output: `Ran 12 tests in 0.517s`; `OK`.
+- GREEN command: `python3 -m unittest discover -s tests -p 'test_voice_state.py' -v` — output: `Ran 2 tests in 0.002s`; `OK`.
+- GREEN command: `python3 -m unittest discover -s tests -v` — output: `Ran 27 tests in 0.551s`; `OK`. Python 3.9 emitted `ResourceWarning`s for unclosed sockets; suite passed.
+- GREEN command: `git diff --check` — exit 0.
+- Product commit SHA: `cdf7d22a1bac596abf6fdc2699fb32b381f2c247` (`fix: encode voice request idempotency key unambiguously`).
+- Live Desktop visibility remains unverified. No live API server/configuration/credentials touched.
