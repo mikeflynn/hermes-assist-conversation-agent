@@ -129,7 +129,7 @@ OK
 - Hygiene: `git diff --check` — exit 0.
 
 ### Commit
-- Pending.
+- `ffc93a26bda54735a176a551169f76b79d05d6e6 fix: reject drive-qualified voice resource paths`
 
 ### Concerns
 - This rejects any alphabetic drive-prefix form before path parsing; no OS-specific path library is used, preserving Python 3.9 compatibility.
