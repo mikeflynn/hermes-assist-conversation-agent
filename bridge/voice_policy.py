@@ -11,8 +11,8 @@ _ACCESS_MODES = frozenset(("read_only", "scoped_write", "proposal_only"))
 
 def _path_components(value: str, allow_dot: bool = False) -> Tuple[str, ...]:
     normalized = value.replace("\\", "/")
-    if normalized.startswith("/"):
-        raise ValueError("absolute paths are not allowed")
+    if normalized.startswith("/") or (len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":"):
+        raise ValueError("absolute or drive-qualified paths are not allowed")
     parts = tuple(part for part in normalized.split("/") if part)
     if any(part == ".." or (part == "." and not allow_dot) for part in parts):
         raise ValueError("unsafe path component")

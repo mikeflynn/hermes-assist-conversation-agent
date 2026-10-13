@@ -36,5 +36,101 @@
 - Hygiene: `git diff --check` — exit 0.
 
 ### Commit
-- `7d53f406c990d17f7c9a00307a3d2662316da635 fix: harden voice capability authorization`
+- `f56715ea53dde6c08a161c04c9a6fb617412e129 fix: harden voice capability authorization`
+
+## Fix-round 2 — Windows drive-qualified path bypass
+
+### Changes
+- `bridge/voice_policy.py`: reject paths whose first two characters are an ASCII/Unicode alphabetic drive letter and colon, covering both drive-absolute (`C:\\Agent`) and drive-qualified (`C:Agent`) forms. The shared path-component validator applies this to configured scopes and requested resources.
+- `tests/test_voice_policy.py`: add both forms to scope-rejection tests and assert write authorization denies both forms as resources.
+
+### TDD evidence
+- RED command: `python3 -m unittest discover -s tests -p 'test_voice_policy.py' -v`
+- RED output (exit 1):
+```text
+test_allows_read_for_registered_tool (test_voice_policy.VoicePolicyTests) ... ok
+test_allows_write_within_scope (test_voice_policy.VoicePolicyTests) ... ok
+test_denies_invalid_operation_and_resource_types (test_voice_policy.VoicePolicyTests) ... ok
+test_denies_unknown_capability_or_tool (test_voice_policy.VoicePolicyTests) ... ok
+test_denies_write_outside_scope (test_voice_policy.VoicePolicyTests) ... ok
+test_disabled_capability_is_denied (test_voice_policy.VoicePolicyTests) ... ok
+test_loads_registry_and_lists_only_enabled_tools (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_duplicate_capability_ids (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_empty_description_and_duplicate_tool_names (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_malformed_registry_shapes (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_unknown_access_mode (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_unsafe_scopes_and_empty_scoped_write_scope (test_voice_policy.VoicePolicyTests) ... test_scope_uses_canonical_components_and_rejects_unsafe_paths (test_voice_policy.VoicePolicyTests) ... ok
+
+======================================================================
+FAIL: test_rejects_unsafe_scopes_and_empty_scoped_write_scope (test_voice_policy.VoicePolicyTests) (scope=['C:\\\\Agent'])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/mikeflynn/Code/worktrees/hermes-assist-conversation-agent/tests/test_voice_policy.py", line 78, in test_rejects_unsafe_scopes_and_empty_scoped_write_scope
+    self.load([self.capability(resource_scope=scope)])
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_rejects_unsafe_scopes_and_empty_scoped_write_scope (test_voice_policy.VoicePolicyTests) (scope=['C:Agent'])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/mikeflynn/Code/worktrees/hermes-assist-conversation-agent/tests/test_voice_policy.py", line 78, in test_rejects_unsafe_scopes_and_empty_scoped_write_scope
+    self.load([self.capability(resource_scope=scope)])
+AssertionError: ValueError not raised
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.008s
+
+FAILED (failures=2)
+```
+- Focused GREEN command: `python3 -m unittest discover -s tests -p 'test_voice_policy.py' -v`
+- Focused GREEN output (exit 0):
+```text
+test_allows_read_for_registered_tool (test_voice_policy.VoicePolicyTests) ... ok
+test_allows_write_within_scope (test_voice_policy.VoicePolicyTests) ... ok
+test_denies_invalid_operation_and_resource_types (test_voice_policy.VoicePolicyTests) ... ok
+test_denies_unknown_capability_or_tool (test_voice_policy.VoicePolicyTests) ... ok
+test_denies_write_outside_scope (test_voice_policy.VoicePolicyTests) ... ok
+test_disabled_capability_is_denied (test_voice_policy.VoicePolicyTests) ... ok
+test_loads_registry_and_lists_only_enabled_tools (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_duplicate_capability_ids (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_empty_description_and_duplicate_tool_names (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_malformed_registry_shapes (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_unknown_access_mode (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_unsafe_scopes_and_empty_scoped_write_scope (test_voice_policy.VoicePolicyTests) ... ok
+test_scope_uses_canonical_components_and_rejects_unsafe_paths (test_voice_policy.VoicePolicyTests) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.008s
+
+OK
+```
+- Full unittest discovery command: `python3 -m unittest discover -s tests -v`
+- Full unittest discovery output (exit 0):
+```text
+test_allows_read_for_registered_tool (test_voice_policy.VoicePolicyTests) ... ok
+test_allows_write_within_scope (test_voice_policy.VoicePolicyTests) ... ok
+test_denies_invalid_operation_and_resource_types (test_voice_policy.VoicePolicyTests) ... ok
+test_denies_unknown_capability_or_tool (test_voice_policy.VoicePolicyTests) ... ok
+test_denies_write_outside_scope (test_voice_policy.VoicePolicyTests) ... ok
+test_disabled_capability_is_denied (test_voice_policy.VoicePolicyTests) ... ok
+test_loads_registry_and_lists_only_enabled_tools (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_duplicate_capability_ids (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_empty_description_and_duplicate_tool_names (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_malformed_registry_shapes (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_unknown_access_mode (test_voice_policy.VoicePolicyTests) ... ok
+test_rejects_unsafe_scopes_and_empty_scoped_write_scope (test_voice_policy.VoicePolicyTests) ... ok
+test_scope_uses_canonical_components_and_rejects_unsafe_paths (test_voice_policy.VoicePolicyTests) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.008s
+
+OK
+```
+- Hygiene: `git diff --check` — exit 0.
+
+### Commit
+- Pending.
+
+### Concerns
+- This rejects any alphabetic drive-prefix form before path parsing; no OS-specific path library is used, preserving Python 3.9 compatibility.
 

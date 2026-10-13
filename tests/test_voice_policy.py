@@ -57,7 +57,7 @@ class VoicePolicyTests(unittest.TestCase):
     def test_scope_uses_canonical_components_and_rejects_unsafe_paths(self):
         policy = self.load([self.capability(resource_scope=["Agent//./"])])
         self.assertTrue(policy.authorize("notes", "notes.write", "write", "Agent/today.md"))
-        for resource in ("Agentish/today.md", "/Agent/today.md", "Agent/../elsewhere.md", "Agent//../elsewhere.md", "Agent\\..\\elsewhere.md", "Agent/./today.md", ""):
+        for resource in ("Agentish/today.md", "/Agent/today.md", "Agent/../elsewhere.md", "Agent//../elsewhere.md", "Agent\\..\\elsewhere.md", "Agent/./today.md", "C:\\Agent\\today.md", "C:Agent/today.md", ""):
             with self.subTest(resource=resource):
                 self.assertFalse(policy.authorize("notes", "notes.write", "write", resource))
 
@@ -73,7 +73,7 @@ class VoicePolicyTests(unittest.TestCase):
                 self.load([self.capability(**override)])
 
     def test_rejects_unsafe_scopes_and_empty_scoped_write_scope(self):
-        for scope in ([""], ["/Agent"], ["Agent/../outside"], ["Agent\\..\\outside"], []):
+        for scope in ([""], ["/Agent"], ["C:\\Agent"], ["C:Agent"], ["Agent/../outside"], ["Agent\\..\\outside"], []):
             with self.subTest(scope=scope), self.assertRaises(ValueError):
                 self.load([self.capability(resource_scope=scope)])
 
