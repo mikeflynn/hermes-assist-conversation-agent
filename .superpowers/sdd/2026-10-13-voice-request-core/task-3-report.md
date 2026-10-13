@@ -12,4 +12,4 @@
   - `python3 -m unittest discover -s tests -v` — 36 tests passed.
   - `git diff --check` — clean.
 - Remaining external gate: Task 4 must verify the running API server's explicit restricted tool inventory and desktop/session behavior before live handoffs are enabled. No claim is made that a live handoff currently activates.
-- Product commit SHA: pending commit at report update.
+- Product commit SHA: `2cfd75d9693c10ec4970dbcd1ad8cbc7ff548424` (`fix: close voice routing safety gaps`).
