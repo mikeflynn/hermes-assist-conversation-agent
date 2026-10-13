@@ -1,5 +1,6 @@
 """Small authenticated client for the Hermes API Server."""
 import json
+import hashlib
 import urllib.error
 import urllib.request
 
@@ -52,8 +53,15 @@ class HermesApiClient:
 
     def get_capabilities(self):
         data=self._request('GET','/v1/capabilities')
-        if data.get('object')!='hermes.api_server.capabilities' or not isinstance(data.get('features'),dict) or not isinstance(data.get('endpoints'),dict):
+        endpoints=data.get('endpoints'); features=data.get('features')
+        required={'runs':('POST','/v1/runs'),'session_create':('POST','/api/sessions')}
+        if data.get('object')!='hermes.api_server.capabilities' or not isinstance(features,dict) or not isinstance(endpoints,dict): raise HermesApiError('invalid capabilities response')
+        idempotency=features.get('runs_idempotency')
+        if features.get('run_submission') is not True or not isinstance(idempotency,dict) or idempotency.get('supported') is not True:
             raise HermesApiError('invalid capabilities response')
+        for name, expected in required.items():
+            item=endpoints.get(name)
+            if not isinstance(item,dict) or (item.get('method'),item.get('path')) != expected: raise HermesApiError('invalid capabilities response')
         return data
 
     def get_or_create_voice_session(self, state_path):
@@ -70,16 +78,15 @@ class HermesApiClient:
 
     def submit_voice_request(self, session_id, request_id, text, context):
         if not all(isinstance(x,str) and x for x in (session_id,request_id,text)): raise HermesApiError('invalid handoff request')
-        if self._voice_state is not None and request_id in self._voice_state.recent_request_ids():
-            return HandoffResult('accepted',session_id,request_id,'deduplicated')
-        prior=self._submitted.get((session_id,request_id))
-        if prior is not None: return prior
-        response=self._request('POST','/v1/runs',{'input':text,'session_id':session_id,'context':context},request_id)
-        run=response.get('run')
-        run_id=run.get('id') if isinstance(run,dict) else None
-        status=run.get('status') if isinstance(run,dict) else None
-        if response.get('object')!='hermes.run' or not isinstance(run_id,str) or not run_id or not isinstance(status,str): raise HermesApiError('invalid run response')
+        # Keep a local fingerprint for diagnostics, but always let the server's
+        # Idempotency-Key contract resolve replays/conflicts atomically.
+        payload={'input':text,'session_id':session_id,'instructions':json.dumps(context,sort_keys=True,separators=(',',':')) if context else ''}
+        fingerprint=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode('utf-8')).hexdigest()
+        response=self._request('POST','/v1/runs',payload,request_id)
+        run_id=response.get('run_id')
+        status=response.get('status')
+        if not isinstance(run_id,str) or not run_id or not isinstance(status,str) or not status: raise HermesApiError('invalid run response')
         result=HandoffResult('accepted',session_id,request_id,status)
         self._submitted[(session_id,request_id)]=result
-        if self._voice_state is not None: self._voice_state.remember_request(request_id)
+        if self._voice_state is not None: self._voice_state.remember_request(session_id,request_id,fingerprint)
         return result

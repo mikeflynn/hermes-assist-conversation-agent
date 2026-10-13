@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import threading
+import fcntl
 
 class VoiceState:
     def __init__(self, path, recent_limit=100):
@@ -50,9 +51,21 @@ class VoiceState:
             ids=self._read().get('request_ids',[])
             return ids[-self.recent_limit:] if isinstance(ids,list) else []
 
-    def remember_request(self, request_id):
+    def remember_request(self, session_id, request_id, fingerprint):
+        """Persist request identity under its session; server remains dedupe authority."""
         with self._lock:
-            data=self._read(); ids=data.get('request_ids',[])
-            if not isinstance(ids,list): ids=[]
-            if request_id not in ids: ids.append(request_id)
-            data['request_ids']=ids[-self.recent_limit:]; data.setdefault('session_id',None); self._write(data)
+            lock_path=self.path+'.lock'
+            directory=os.path.dirname(os.path.abspath(lock_path)); os.makedirs(directory,exist_ok=True)
+            fd=os.open(lock_path,os.O_CREAT|os.O_RDWR,0o600)
+            try:
+                fcntl.flock(fd,fcntl.LOCK_EX)
+                data=self._read(); records=data.get('requests',[])
+                if not isinstance(records,list): records=[]
+                record={'session_id':session_id,'request_id':request_id,'fingerprint':fingerprint}
+                if record not in records: records.append(record)
+                data['requests']=records[-self.recent_limit:]
+                data['session_id']=session_id
+                data['request_ids']=[r.get('request_id') for r in data['requests'] if r.get('session_id')==session_id]
+                self._write(data)
+            finally:
+                fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)

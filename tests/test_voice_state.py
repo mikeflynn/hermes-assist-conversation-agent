@@ -11,7 +11,7 @@ class VoiceStateTests(unittest.TestCase):
             p=os.path.join(d,'state.json')
             state=VoiceState(p)
             state.save_session('s-1')
-            state.remember_request('r-1')
+            state.remember_request('s-1','r-1','fingerprint')
             self.assertEqual(state.load_session(),'s-1')
             self.assertIn('r-1',state.recent_request_ids())
             self.assertEqual(stat.S_IMODE(os.stat(p).st_mode),0o600)
