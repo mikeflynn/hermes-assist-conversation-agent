@@ -92,6 +92,9 @@ Supported bridge environment variables:
 - `HERMES_ASSIST_MAX_TURNS`
 - `HERMES_ASSIST_REASONING`
 - `HERMES_ASSIST_USE_DIRECT_AGENT` — set to `1` to try in-process Hermes reuse
+- `HERMES_ASSIST_CALENDAR_BRIEF` — path to the pre-generated calendar Markdown brief
+- `HERMES_ASSIST_THINGS_BRIEF` — path to the pre-generated Things Today Markdown brief
+- `HERMES_ASSIST_NEWS_BRIEF` — path to the pre-generated 24-hour news Markdown brief
 
 ## Security notes
 
