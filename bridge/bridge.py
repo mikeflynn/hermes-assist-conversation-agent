@@ -20,6 +20,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 import hashlib
+import ipaddress
+import shutil
+import urllib.parse
 from collections import OrderedDict
 
 from .voice_responses import VoiceOutcome, format_spoken_reply
@@ -216,10 +219,67 @@ def get_voice_client():
     if not base_url or not api_key:
         return None
     try:
+        parsed = urllib.parse.urlsplit(base_url)
+        host = parsed.hostname
+        if parsed.scheme not in {"http", "https"} or not host or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment or "?" in base_url or "#" in base_url:
+            return None
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = host.lower() == "localhost"
+        configured_toolsets = _configured_api_toolsets()
+        if not loopback or not isinstance(configured_toolsets, list) or "no_mcp" not in configured_toolsets:
+            return None
+        timeout = int(os.environ.get("HERMES_API_TIMEOUT_SECONDS", "10"))
+        if not 1 <= timeout <= 30:
+            return None
+        if os.environ.get("HERMES_ASSIST_TOOLSETS", "").strip():
+            return None
+        policy = get_voice_policy()
         from .hermes_api import HermesApiClient
-        return HermesApiClient(base_url, api_key)
+        client = HermesApiClient(base_url, api_key, timeout=timeout)
+        client.voice_policy = policy
+        return client
     except Exception:
         return None
+
+
+def _configured_api_toolsets():
+    """Read the active Hermes profile's API toolsets without changing config."""
+    executable = shutil.which("hermes")
+    if not executable:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, "config", "get", "--json", "platform_toolsets.api_server"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
+        )
+        if result.returncode != 0:
+            return None
+        value = json.loads(result.stdout)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return None
+        return value
+    except Exception:
+        return None
+
+
+def voice_state_path() -> str:
+    configured = os.environ.get("HERMES_VOICE_STATE_PATH")
+    if configured:
+        return str(Path(configured).expanduser())
+    home = os.environ.get("HERMES_HOME")
+    root = Path(home).expanduser() if home else Path.home() / ".hermes"
+    return str(root / "voice_requests_state.json")
+
+
+def voice_policy_path() -> str:
+    return os.environ.get("HERMES_VOICE_POLICY_FILE", "")
+
+
+def get_voice_policy() -> VoicePolicy:
+    path = voice_policy_path()
+    return VoicePolicy.from_file(path) if path else VoicePolicy(())
 
 
 def derive_request_id(conversation_id: str, text: str, history: str) -> str:
@@ -261,7 +321,7 @@ def route_voice_request(text: str, client, policy: VoicePolicy, calendar_path: s
             return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
     except Exception:
         return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
-    return handoff_request(client, os.environ.get("HERMES_VOICE_STATE_PATH", str(Path.home() / ".hermes" / "voice_requests_state.json")), request_id, text, context)
+    return handoff_request(client, voice_state_path(), request_id, text, context)
 
 
 def get_agent():
@@ -387,7 +447,9 @@ class Handler(BaseHTTPRequestHandler):
             json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "conversation_id": conversation_id or None})
             return
         request_id = str(data.get("request_id") or derive_request_id(conversation_id, text, history))
-        outcome = route_voice_request(text, get_voice_client(), VOICE_POLICY, CALENDAR_BRIEF_PATH, THINGS_BRIEF_PATH, request_id, format_history(data, text), NEWS_BRIEF_PATH)
+        client = get_voice_client()
+        policy = getattr(client, "voice_policy", VOICE_POLICY)
+        outcome = route_voice_request(text, client, policy, CALENDAR_BRIEF_PATH, THINGS_BRIEF_PATH, request_id, format_history(data, text), NEWS_BRIEF_PATH)
         json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "request_id": outcome.request_id, "session_id": outcome.session_id, "conversation_id": conversation_id or None})
         return
 

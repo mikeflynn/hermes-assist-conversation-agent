@@ -103,6 +103,10 @@ Supported bridge environment variables:
 - Keep the bridge reachable only by trusted systems or protect it behind your own network controls.
 - Review the bridge's enabled Hermes toolsets before exposing it to voice input.
 
+For the separate, fail-closed Voice Requests API setup—including loopback-only
+API URLs, the required `no_mcp` toolset sentinel, profile selection, and secret
+handling—see [Voice Requests secure setup](docs/voice-requests-setup.md).
+
 ## Copyright and license
 
 This project is licensed under the MIT License. See `LICENSE` and `NOTICE.md`.
