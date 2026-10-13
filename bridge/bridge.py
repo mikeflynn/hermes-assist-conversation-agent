@@ -22,8 +22,10 @@ from typing import Any
 import hashlib
 
 from .voice_responses import VoiceOutcome, format_spoken_reply
+from .voice_policy import VoicePolicy
 
 _HANDOFF_CACHE: dict[str, VoiceOutcome] = {}
+VOICE_POLICY = VoicePolicy(())
 _HANDOFF_LOCK = threading.Lock()
 MAX_REQUEST_CHARS = 6000
 MAX_CONTEXT_CHARS = 12000
@@ -195,11 +197,39 @@ def handoff_request(client, state_path: str, request_id: str, text: str, context
 
 
 def get_voice_client():
-    base_url, api_key = os.environ.get("HERMES_API_BASE_URL", ""), os.environ.get("HERMES_API_KEY", "")
-    if not base_url or not api_key:
+    # Task 4 must verify an explicit restricted server tool inventory before
+    # enabling live API traffic. Environment configuration alone is not proof.
+    return None
+
+
+def _cached_brief(text: str, calendar_path: str, things_path: str, news_path: str) -> VoiceOutcome | None:
+    lowered = text.lower()
+    if any(word in lowered for word in ("calendar", "schedule", "event")):
+        path = calendar_path
+    elif any(word in lowered for word in ("task", "todo", "to-do", "things", "need to do")):
+        path = things_path
+    elif any(word in lowered for word in ("news", "cybersecurity", "apple updates", "morning brief")):
+        path = news_path
+    else:
         return None
-    from .hermes_api import HermesApiClient
-    return HermesApiClient(base_url, api_key, TIMEOUT)
+    try:
+        content = Path(path).expanduser().read_text(encoding="utf-8")[:4000]
+    except (OSError, ValueError):
+        content = ""
+    if not content.strip():
+        content = "That cached brief is unavailable."
+    return VoiceOutcome("answered", content.strip())
+
+
+def route_voice_request(text: str, client, policy: VoicePolicy, calendar_path: str, things_path: str, request_id: str = "request", context: str = "", news_path: str = NEWS_BRIEF_PATH) -> VoiceOutcome:
+    cached = _cached_brief(text, calendar_path, things_path, news_path)
+    if cached is not None:
+        return cached
+    if not policy.authorize("voice_handoff", "hermes_api", "read", None):
+        return VoiceOutcome("unsupported", "I can't do that from the voice assistant. I haven't taken action.", request_id)
+    if client is None:
+        return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+    return handoff_request(client, os.environ.get("HERMES_VOICE_STATE_PATH", str(Path.home() / ".hermes" / "voice_requests_state.json")), request_id, text, context)
 
 
 def get_agent():
@@ -325,41 +355,9 @@ class Handler(BaseHTTPRequestHandler):
             json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "conversation_id": conversation_id or None})
             return
         request_id = str(data.get("request_id") or hashlib.sha256((conversation_id + "\\0" + text).encode("utf-8")).hexdigest())
-        client = get_voice_client()
-        if client is None:
-            outcome = VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
-        else:
-            outcome = handoff_request(client, os.environ.get("HERMES_VOICE_STATE_PATH", str(Path.home() / ".hermes" / "voice_requests_state.json")), request_id, text, format_history(data, text))
+        outcome = route_voice_request(text, get_voice_client(), VOICE_POLICY, CALENDAR_BRIEF_PATH, THINGS_BRIEF_PATH, request_id, format_history(data, text), NEWS_BRIEF_PATH)
         json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "request_id": outcome.request_id, "session_id": outcome.session_id, "conversation_id": conversation_id or None})
         return
-
-        prompt = (
-            f"{SYSTEM_PROMPT}\n"
-            f"Home Assistant context:\n"
-            f"- conversation_id: {conversation_id or 'none'}\n"
-            f"- language: {language or 'unknown'}\n"
-            f"- device_id: {device_id or 'unknown'}\n"
-        )
-        if extra_system_prompt:
-            prompt += f"- extra Home Assistant instruction: {extra_system_prompt[:1000]}\n"
-        if history:
-            prompt += f"\n{history}"
-        prompt += f"\nUser said: {text}\n\nReply with only the answer the user should hear."
-        prompt = prompt[:MAX_PROMPT_CHARS]
-
-        ok, output = call_hermes_direct(prompt) if USE_DIRECT_AGENT else call_hermes_cli(prompt)
-        if USE_DIRECT_AGENT and not ok:
-            ok, output = call_hermes_cli(prompt)
-
-        if not ok:
-            if output == "timeout":
-                json_response(self, 504, {"error": "timeout", "reply": "Sorry, Hermes took too long to answer."})
-            else:
-                json_response(self, 502, {"error": "hermes_failed", "detail": output[-2000:], "reply": "Sorry, Hermes failed."})
-            return
-
-        output = output.strip() or "Hermes did not return a response."
-        json_response(self, 200, {"reply": output, "conversation_id": conversation_id or None})
 
 
 def main() -> None:
