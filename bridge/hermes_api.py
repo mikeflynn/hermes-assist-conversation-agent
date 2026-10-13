@@ -80,9 +80,12 @@ class HermesApiClient:
         if not all(isinstance(x,str) and x for x in (session_id,request_id,text)): raise HermesApiError('invalid handoff request')
         # Keep a local fingerprint for diagnostics, but always let the server's
         # Idempotency-Key contract resolve replays/conflicts atomically.
-        payload={'input':text,'session_id':session_id,'instructions':json.dumps(context,sort_keys=True,separators=(',',':')) if context else ''}
+        payload={'input':text,'session_id':session_id}
+        if context:
+            payload['conversation_history']=[{'role':'user','content':json.dumps(context,sort_keys=True,separators=(',',':'))}]
         fingerprint=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode('utf-8')).hexdigest()
-        response=self._request('POST','/v1/runs',payload,request_id)
+        scoped_key=hashlib.sha256((session_id+'\\0'+request_id).encode('utf-8')).hexdigest()
+        response=self._request('POST','/v1/runs',payload,scoped_key)
         run_id=response.get('run_id')
         status=response.get('status')
         if not isinstance(run_id,str) or not run_id or not isinstance(status,str) or not status: raise HermesApiError('invalid run response')

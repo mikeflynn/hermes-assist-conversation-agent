@@ -8,6 +8,7 @@ from bridge.hermes_api import HermesApiClient, HandoffResult, HermesApiError
 
 class FakeHandler(BaseHTTPRequestHandler):
     calls = []
+    idempotency = {}
     mode = 'ok'
     caps = None
     def log_message(self, *args): pass
@@ -24,7 +25,16 @@ class FakeHandler(BaseHTTPRequestHandler):
         if type(self).mode == 'malformed': return self._reply(202, {'object':'hermes.run'})
         if type(self).mode == 'conflict': return self._reply(409, {'error':'conflict'})
         if self.path == '/api/sessions': self._reply(201, {'object':'hermes.session','session':{'id':'sess-1'}})
-        else: self._reply(202, {'run_id':'run-1','status':'queued','replayed':False})
+        else:
+            key=self.headers.get('Idempotency-Key')
+            body=json.loads(body or b'{}')
+            prior=type(self).idempotency.get(key)
+            if prior:
+                if prior[0] != body: return self._reply(409, {'error':'conflict'})
+                return self._reply(202, dict(prior[1], replayed=True))
+            response={'run_id':'run-%d'%(len(type(self).idempotency)+1),'status':'queued','replayed':False}
+            type(self).idempotency[key]=(body,response)
+            self._reply(202,response)
 
 class ApiTests(unittest.TestCase):
     @classmethod
@@ -32,7 +42,7 @@ class ApiTests(unittest.TestCase):
         cls.server=HTTPServer(('127.0.0.1',0),FakeHandler); cls.thread=threading.Thread(target=cls.server.serve_forever,daemon=True); cls.thread.start()
     @classmethod
     def tearDownClass(cls): cls.server.shutdown(); cls.thread.join()
-    def setUp(self): FakeHandler.calls=[]; FakeHandler.mode='ok'; FakeHandler.caps=None; self.client=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
+    def setUp(self): FakeHandler.calls=[]; FakeHandler.idempotency={}; FakeHandler.mode='ok'; FakeHandler.caps=None; self.client=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
     def test_authenticates_discovers_caps_and_creates_then_reuses_session(self):
         import tempfile, os
         with tempfile.TemporaryDirectory() as d:
@@ -43,7 +53,7 @@ class ApiTests(unittest.TestCase):
     def test_submission_is_retry_safe_and_does_not_expose_key(self):
         r=self.client.submit_voice_request('sess-1','req-7','hello',{'source':'voice'})
         self.assertIsInstance(r,HandoffResult); self.assertEqual(r.status,'accepted'); self.assertEqual(r.session_id,'sess-1'); self.assertEqual(r.request_id,'req-7')
-        call=FakeHandler.calls[-1]; self.assertEqual(call[3],'req-7'); self.assertEqual(call[4]['input'],'hello'); self.assertNotIn('test-secret',repr(r))
+        call=FakeHandler.calls[-1]; self.assertNotEqual(call[3],'req-7'); self.assertEqual(call[4]['input'],'hello'); self.assertNotIn('test-secret',repr(r))
     def test_http_failure_is_typed_and_secret_safe(self):
         FakeHandler.mode='http'
         with self.assertRaises(HermesApiError) as cm: self.client.submit_voice_request('s','r','x',{})
@@ -65,27 +75,44 @@ class ApiTests(unittest.TestCase):
         with self.assertRaises(HermesApiError): self.client.submit_voice_request('s','r','x',{})
 
     def test_same_key_replay_sent_with_same_body_and_session_scoped(self):
-        self.client.submit_voice_request('s1','same','x',{'a':1})
-        self.client.submit_voice_request('s1','same','x',{'a':1})
-        self.client.submit_voice_request('s2','same','x',{'a':1})
+        first=self.client.submit_voice_request('s1','same','x',{'a':1})
+        replay=self.client.submit_voice_request('s1','same','x',{'a':1})
+        other=self.client.submit_voice_request('s2','same','x',{'a':1})
         calls=[c for c in FakeHandler.calls if c[1]=='/v1/runs']
         self.assertEqual(len(calls),3)
-        self.assertTrue(all(c[4].get('input') == 'x' for c in calls))
-        self.assertNotIn('context',calls[0][4])
-        self.assertIn('instructions',calls[0][4])
+        self.assertEqual(first.detail,replay.detail)
+        self.assertEqual(other.status,'accepted')
+        self.assertEqual(len(set(c[3] for c in calls)),2)
+        self.assertEqual(len(FakeHandler.idempotency),2)
+        self.assertEqual(FakeHandler.idempotency[calls[0][3]][1]['run_id'],FakeHandler.idempotency[calls[1][3]][1]['run_id'])
+        self.assertEqual(calls[0][4]['conversation_history'],[{'role':'user','content':'{"a":1}'}])
+        self.assertNotIn('instructions',calls[0][4])
 
-    def test_retry_from_another_client_reaches_server_with_same_idempotency_key(self):
-        self.client.submit_voice_request('s','cross-client','x',{})
-        other=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
-        other.submit_voice_request('s','cross-client','x',{})
+    def test_persistent_replay_conflict_and_session_isolation_across_clients(self):
+        a=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
+        b=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
+        first=a.submit_voice_request('s1','same','x',{'a':1})
+        replay=b.submit_voice_request('s1','same','x',{'a':1})
+        self.assertEqual(first.detail,replay.detail)
+        with self.assertRaises(HermesApiError): b.submit_voice_request('s1','same','changed',{'a':1})
+        other=b.submit_voice_request('s2','same','x',{'a':1})
+        self.assertEqual(other.status,'accepted')
         calls=[c for c in FakeHandler.calls if c[1]=='/v1/runs']
-        self.assertEqual(len(calls),2)
-        self.assertEqual([c[3] for c in calls],['cross-client','cross-client'])
+        self.assertEqual(len(calls),4)
+        self.assertEqual(len(set(c[3] for c in calls)),2)
+        self.assertEqual(len(FakeHandler.idempotency),2)
+        self.assertEqual(FakeHandler.idempotency[calls[0][3]][1]['run_id'],FakeHandler.idempotency[calls[1][3]][1]['run_id'])
+        self.assertNotEqual(FakeHandler.idempotency[calls[0][3]][1]['run_id'],FakeHandler.idempotency[calls[3][3]][1]['run_id'])
 
-    def test_changed_payload_same_key_fails_closed(self):
-        self.client.submit_voice_request('s','same','x',{'a':1})
-        FakeHandler.mode='conflict'
-        with self.assertRaises(HermesApiError): self.client.submit_voice_request('s','same','different',{'a':2})
+    def test_concurrent_clients_replay_one_persistent_run(self):
+        clients=[HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1) for _ in range(2)]
+        results=[]
+        threads=[threading.Thread(target=lambda c=c: results.append(c.submit_voice_request('s','concurrent','x',{}))) for c in clients]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        self.assertEqual(len(results),2)
+        self.assertEqual(results[0].detail,results[1].detail)
+        self.assertEqual(len([c for c in FakeHandler.calls if c[1]=='/v1/runs']),2)
 
     def test_timeout_is_typed(self):
         client=HermesApiClient('http://10.255.255.1','secret',0.001)
