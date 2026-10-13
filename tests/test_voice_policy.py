@@ -54,6 +54,34 @@ class VoicePolicyTests(unittest.TestCase):
         policy = self.load([self.capability()])
         self.assertFalse(policy.authorize("notes", "notes.write", "write", "elsewhere.md"))
 
+    def test_scope_uses_canonical_components_and_rejects_unsafe_paths(self):
+        policy = self.load([self.capability(resource_scope=["Agent//./"])])
+        self.assertTrue(policy.authorize("notes", "notes.write", "write", "Agent/today.md"))
+        for resource in ("Agentish/today.md", "/Agent/today.md", "Agent/../elsewhere.md", "Agent//../elsewhere.md", "Agent\\..\\elsewhere.md", "Agent/./today.md", ""):
+            with self.subTest(resource=resource):
+                self.assertFalse(policy.authorize("notes", "notes.write", "write", resource))
+
+    def test_denies_invalid_operation_and_resource_types(self):
+        policy = self.load([self.capability()])
+        for operation, resource in (("delete", "Agent/a.md"), ("WRITE", "Agent/a.md"), ("write", None), ("write", 42)):
+            with self.subTest(operation=operation, resource=resource):
+                self.assertFalse(policy.authorize("notes", "notes.write", operation, resource))
+
+    def test_rejects_empty_description_and_duplicate_tool_names(self):
+        for override in ({"description": "  "}, {"tools": ["notes.read", "notes.read"]}):
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                self.load([self.capability(**override)])
+
+    def test_rejects_unsafe_scopes_and_empty_scoped_write_scope(self):
+        for scope in ([""], ["/Agent"], ["Agent/../outside"], ["Agent\\..\\outside"], []):
+            with self.subTest(scope=scope), self.assertRaises(ValueError):
+                self.load([self.capability(resource_scope=scope)])
+
+    def test_rejects_malformed_registry_shapes(self):
+        for capabilities in (None, {}, "not-a-list", [None], [self.capability(tools="notes.read")], [self.capability(resource_scope=[None])]):
+            with self.subTest(capabilities=capabilities), self.assertRaises(ValueError):
+                self.load(capabilities)
+
     def test_denies_unknown_capability_or_tool(self):
         policy = self.load([self.capability()])
         self.assertFalse(policy.authorize("missing", "notes.read", "read", "Agent/a.md"))
