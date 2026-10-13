@@ -84,7 +84,7 @@ class HermesApiClient:
         if context:
             payload['conversation_history']=[{'role':'user','content':json.dumps(context,sort_keys=True,separators=(',',':'))}]
         fingerprint=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode('utf-8')).hexdigest()
-        scoped_key=hashlib.sha256((session_id+'\\0'+request_id).encode('utf-8')).hexdigest()
+        scoped_key=hashlib.sha256(json.dumps([session_id,request_id],separators=(',',':'),ensure_ascii=False).encode('utf-8')).hexdigest()
         response=self._request('POST','/v1/runs',payload,scoped_key)
         run_id=response.get('run_id')
         status=response.get('status')

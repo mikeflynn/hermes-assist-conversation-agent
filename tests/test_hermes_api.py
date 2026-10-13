@@ -88,6 +88,14 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(calls[0][4]['conversation_history'],[{'role':'user','content':'{"a":1}'}])
         self.assertNotIn('instructions',calls[0][4])
 
+    def test_separator_like_ids_produce_distinct_server_idempotency_keys(self):
+        self.client.submit_voice_request(r'a\0b','c','same',{})
+        self.client.submit_voice_request('a',r'b\0c','same',{})
+        calls=[c for c in FakeHandler.calls if c[1]=='/v1/runs']
+        self.assertEqual(len(calls),2)
+        self.assertNotEqual(calls[0][3],calls[1][3])
+        self.assertEqual(len(FakeHandler.idempotency),2)
+
     def test_persistent_replay_conflict_and_session_isolation_across_clients(self):
         a=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
         b=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
