@@ -36,13 +36,32 @@ class BridgeOutcomeTests(unittest.TestCase):
         policy = VoicePolicy((CapabilityRegistration('voice_handoff', 'handoff', ('hermes_api',), 'proposal_only', (), True),))
         client = Mock()
         client.get_capabilities.return_value = {'ok': True}
-        client.get_enabled_tool_inventory.return_value = frozenset(('hermes_api',))
+        client.get_enabled_tool_inventory.return_value = frozenset()
         client.get_or_create_voice_session.return_value = 'safe-session'
         client.submit_voice_request.return_value = Mock(status='accepted', session_id='safe-session')
         bridge._HANDOFF_CACHE.clear()
         result = bridge.route_voice_request('please research this', client, policy, '', '', 'safe-request')
         self.assertEqual(result.status, 'handed_off')
         self.assertEqual(result.session_id, 'safe-session')
+
+    def test_registered_home_assistant_and_conduit_tools_match_live_inventory(self):
+        homeassistant = ('ha_call_service', 'ha_get_state', 'ha_list_entities', 'ha_list_services')
+        conduit = ('conduit_call_user', 'conduit_call_watch', 'conduit_settings', 'conduit_watch_report')
+        policy = VoicePolicy((
+            CapabilityRegistration('voice_handoff', 'handoff', ('hermes_api',), 'proposal_only', (), True),
+            CapabilityRegistration('home_assistant', 'Home Assistant tools approved for voice', homeassistant, 'direct_tool_access', (), True),
+            CapabilityRegistration('conduit', 'Conduit tools approved for voice', conduit, 'direct_tool_access', (), True),
+        ))
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = frozenset(homeassistant + conduit)
+        client.get_or_create_voice_session.return_value = 'voice-session'
+        client.submit_voice_request.return_value = Mock(status='accepted', session_id='voice-session')
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('please check my home', client, policy, '', '', 'approved-tools')
+        self.assertEqual(result.status, 'handed_off')
+        self.assertEqual(result.session_id, 'voice-session')
+        client.submit_voice_request.assert_called_once()
 
     def test_empty_registry_allows_no_tool_transport_only_when_inventory_matches(self):
         client = Mock()

@@ -26,7 +26,7 @@ Set these only in the bridge service's private environment or a secret manager; 
 - `HERMES_API_TIMEOUT_SECONDS`: optional integer from `1` through `30`; defaults to `10`.
 - `HERMES_HOME`: optional active Hermes home/profile root. The bridge's read-only config lookup runs through the `hermes` executable in the service's environment.
 - `HERMES_VOICE_STATE_PATH`: optional persistent session state path. Defaults to `$HERMES_HOME/voice_requests_state.json`; if `HERMES_HOME` is unset, defaults to `~/.hermes/voice_requests_state.json`. Restrict file permissions to the bridge service account and back it up only as sensitive state.
-- `HERMES_VOICE_POLICY_FILE`: optional JSON capability registry. If absent, the policy is empty and optional tools are denied. If supplied, it must be readable and valid; invalid or unreadable files disable client construction.
+- `HERMES_VOICE_POLICY_FILE`: optional JSON capability registry. If absent, the policy is empty and optional tools are denied. If supplied, it must be readable and valid; invalid or unreadable files disable client construction. `direct_tool_access` registers tools that the API server may execute on the model's behalf; it does not constrain arguments or require per-call approval. The `voice_handoff`/`hermes_api` transport marker is not part of the API-server tool inventory.
 
 Do not set `HERMES_ASSIST_TOOLSETS` for this API handoff; a non-empty legacy local-agent selection is treated as unsafe and disables the API client. Do not place secrets in command-line arguments, shell history, source control, or diagnostic output.
 

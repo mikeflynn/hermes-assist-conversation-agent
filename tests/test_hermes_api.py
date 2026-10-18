@@ -46,6 +46,10 @@ class ApiTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): cls.server.shutdown(); cls.thread.join()
     def setUp(self): FakeHandler.calls=[]; FakeHandler.idempotency={}; FakeHandler.mode='ok'; FakeHandler.caps=None; self.client=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
+    def test_enabled_tool_inventory_accepts_current_api_server_response_shape(self):
+        FakeHandler.inventory={'object':'list','platform':'api_server','data':[{'name':'homeassistant','enabled':True,'tools':['ha_call_service','ha_get_state']},{'name':'conduit','enabled':True,'tools':['conduit_call_user']},{'name':'unused','enabled':False,'tools':['danger']}]}
+        self.assertEqual(self.client.get_enabled_tool_inventory(),frozenset(('ha_call_service','ha_get_state','conduit_call_user')))
+
     def test_enabled_tool_inventory_returns_concrete_enabled_tools(self):
         FakeHandler.inventory={'object':'hermes.api_server.toolsets','toolsets':[{'name':'calendar','enabled':True,'tools':['calendar_list','calendar_get']},{'name':'unused','enabled':False,'tools':['danger']}]}
         self.assertEqual(self.client.get_enabled_tool_inventory(),frozenset(('calendar_list','calendar_get')))

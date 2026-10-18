@@ -73,7 +73,7 @@ Only say a request was handed off after the session write is confirmed. Never de
 
 ## Security and operational requirements
 
-- Voice-originated tools are allowlisted; no inherited full CLI defaults. Exclude terminal, arbitrary code execution, broad filesystem writes, and HA control from the voice path unless a future reviewed policy explicitly changes scope.
+- Voice-originated tools are allowlisted; no inherited full CLI defaults. Exclude terminal, arbitrary code execution, and broad filesystem writes. The currently approved voice API inventory is limited to the exact Home Assistant and Conduit tools registered in `bridge/voice_capabilities.json`; additions require explicit policy authorization and a matching live-inventory check.
 - Obsidian access is path-scoped: read/write in `Agent`, read-only elsewhere, and destructive operations approval-gated. Enforce this in the tool/adapter itself. Invoice Ninja reads/writes use separate least-privilege credentials where supported.
 - Keep API keys out of prompts, logs, and speech. Authenticate bridge-to-Hermes API calls; bind services to trusted interfaces and use TLS/access controls when traffic crosses an untrusted network.
 - Preserve request IDs and use idempotency/deduplication for handoffs and later writes to prevent retries from creating duplicate records.

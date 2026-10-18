@@ -30,6 +30,24 @@ class VoicePolicyTests(unittest.TestCase):
         policy = self.load([self.capability(), self.capability(capability_id="off", voice_enabled=False)])
         self.assertEqual(policy.allowed_tools(), {"notes.read", "notes.write"})
 
+    def test_voice_handoff_marker_is_not_part_of_api_tool_allowlist(self):
+        policy = self.load([
+            self.capability(capability_id="voice_handoff", tools=["hermes_api"], access="proposal_only", resource_scope=[]),
+            self.capability(capability_id="home_assistant", tools=["ha_get_state"], access="direct_tool_access", resource_scope=[]),
+        ])
+        self.assertEqual(policy.allowed_tools(), {"ha_get_state"})
+        self.assertTrue(policy.authorize("voice_handoff", "hermes_api", "read", None))
+        self.assertTrue(policy.authorize("home_assistant", "ha_get_state", "execute", None))
+        self.assertFalse(policy.authorize("home_assistant", "ha_get_state", "write", "somewhere"))
+
+    def test_voice_capabilities_registry_matches_approved_api_tools(self):
+        registry = Path(__file__).resolve().parents[1] / "bridge" / "voice_capabilities.json"
+        policy = VoicePolicy.from_file(registry)
+        self.assertEqual(policy.allowed_tools(), {
+            "ha_call_service", "ha_get_state", "ha_list_entities", "ha_list_services",
+            "conduit_call_user", "conduit_call_watch", "conduit_settings", "conduit_watch_report",
+        })
+
     def test_rejects_duplicate_capability_ids(self):
         with self.assertRaises(ValueError):
             self.load([self.capability(), self.capability()])

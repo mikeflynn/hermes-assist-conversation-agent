@@ -16,7 +16,7 @@
 - Voice may write only inside Obsidian `Agent`; all other writes require Hermes app takeover and approval.
 - Unregistered capabilities are unavailable to voice by default; skill prose is not a permission grant.
 - Voice replies must clearly distinguish answered, handed off, unsupported, and unavailable/error outcomes.
-- No inherited full CLI tools; exclude terminal, arbitrary code execution, broad filesystem writes, and HA control from voice.
+- No inherited full CLI tools; exclude terminal, arbitrary code execution, and broad filesystem writes. The currently user-approved voice API inventory is exactly the Home Assistant and Conduit tools listed in `bridge/voice_capabilities.json`; any additional tool requires explicit policy registration and a matching live-inventory review.
 - Preserve pre-existing uncommitted changes in `bridge/bridge.py` and `README.md`.
 
 ## Review Focus

@@ -1,3 +1,38 @@
 {
-  "capabilities": []
+  "capabilities": [
+    {
+      "capability_id": "voice_handoff",
+      "description": "Allow the bridge to hand off a voice request to the persistent Voice Requests session.",
+      "tools": ["hermes_api"],
+      "access": "proposal_only",
+      "resource_scope": [],
+      "voice_enabled": true
+    },
+    {
+      "capability_id": "home_assistant",
+      "description": "Allow Voice Requests direct use of the configured Home Assistant tools, including service calls.",
+      "tools": [
+        "ha_call_service",
+        "ha_get_state",
+        "ha_list_entities",
+        "ha_list_services"
+      ],
+      "access": "direct_tool_access",
+      "resource_scope": [],
+      "voice_enabled": true
+    },
+    {
+      "capability_id": "conduit",
+      "description": "Allow Voice Requests direct use of Conduit tools, including calls and watch operations.",
+      "tools": [
+        "conduit_call_user",
+        "conduit_call_watch",
+        "conduit_settings",
+        "conduit_watch_report"
+      ],
+      "access": "direct_tool_access",
+      "resource_scope": [],
+      "voice_enabled": true
+    }
+  ]
 }

@@ -66,8 +66,13 @@ class HermesApiClient:
 
     def get_enabled_tool_inventory(self):
         data = self._request('GET', '/v1/toolsets')
-        entries = data.get('toolsets')
-        if data.get('object') != 'hermes.api_server.toolsets' or not isinstance(entries, list):
+        if data.get('object') == 'list' and data.get('platform') == 'api_server':
+            entries = data.get('data')
+        elif data.get('object') == 'hermes.api_server.toolsets':
+            entries = data.get('toolsets')
+        else:
+            raise HermesApiError('invalid tool inventory response')
+        if not isinstance(entries, list):
             raise HermesApiError('invalid tool inventory response')
         tools = set()
         for entry in entries:

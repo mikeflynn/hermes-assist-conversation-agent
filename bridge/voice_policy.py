@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 
-_ACCESS_MODES = frozenset(("read_only", "scoped_write", "proposal_only"))
+_ACCESS_MODES = frozenset(("read_only", "scoped_write", "proposal_only", "direct_tool_access"))
 
 
 def _path_components(value: str, allow_dot: bool = False) -> Tuple[str, ...]:
@@ -72,13 +72,23 @@ class VoicePolicy:
                 canonical_scope.append(components)
             if access == "scoped_write" and not canonical_scope:
                 raise ValueError("scoped_write requires a non-empty resource_scope")
+            if access == "direct_tool_access" and canonical_scope:
+                raise ValueError("direct_tool_access does not use resource_scope")
+            if capability_id == "voice_handoff" and (tuple(tools) != ("hermes_api",) or access != "proposal_only" or canonical_scope):
+                raise ValueError("voice_handoff must be a proposal_only hermes_api transport capability")
             if not isinstance(enabled, bool):
                 raise ValueError("voice_enabled must be a boolean")
             registrations.append(CapabilityRegistration(capability_id, description, tuple(tools), access, tuple(canonical_scope), enabled))
         return cls(tuple(registrations))
 
     def allowed_tools(self) -> FrozenSet[str]:
-        return frozenset(tool for item in self._registrations.values() if item.voice_enabled for tool in item.tools)
+        return frozenset(
+            tool
+            for item in self._registrations.values()
+            if item.voice_enabled
+            for tool in item.tools
+            if not (item.capability_id == "voice_handoff" and tool == "hermes_api")
+        )
 
     def authorize(self, capability_id: str, tool_name: str, operation: str, resource: Optional[str]) -> bool:
         item = self._registrations.get(capability_id)
@@ -86,6 +96,8 @@ class VoicePolicy:
             return False
         if operation == "read":
             return True
+        if operation == "execute":
+            return item.access == "direct_tool_access"
         if operation != "write" or item.access != "scoped_write" or not isinstance(resource, str) or not resource:
             return False
         try:
