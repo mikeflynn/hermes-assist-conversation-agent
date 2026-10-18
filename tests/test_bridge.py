@@ -158,6 +158,22 @@ class BridgeOutcomeTests(unittest.TestCase):
         self.assertIn("can't confirm", result.spoken_reply)
         client.submit_voice_request.assert_not_called()
 
+    def test_current_sports_question_uses_inline_web_search(self):
+        policy = VoicePolicy((CapabilityRegistration('web_search', 'Read-only web lookup', ('web_search', 'web_extract'), 'read_only', (), True),))
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = frozenset({'web_search', 'web_extract'})
+        client.answer_voice_request.return_value = 'The Lakers won 112 to 108.'
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('What was the Lakers score last night?', client, policy, '', '', 'sports-score')
+        self.assertEqual(result.status, 'answered')
+        self.assertEqual(result.spoken_reply, 'The Lakers won 112 to 108.')
+        instructions = client.answer_voice_request.call_args.kwargs['instructions']
+        self.assertIn('web_search', instructions)
+        self.assertIn('current or time-sensitive', instructions)
+        self.assertIn('source', instructions.lower())
+        client.submit_voice_request.assert_not_called()
+
     def test_non_confirmation_research_question_gets_inline_answer(self):
         client = Mock()
         client.get_capabilities.return_value = {'ok': True}
@@ -169,17 +185,19 @@ class BridgeOutcomeTests(unittest.TestCase):
         self.assertEqual(result.spoken_reply, 'Here is the concise summary.')
         client.submit_voice_request.assert_not_called()
 
-    def test_registered_home_assistant_and_conduit_tools_match_live_inventory(self):
+    def test_registered_home_assistant_conduit_and_web_tools_match_live_inventory(self):
         homeassistant = ('ha_call_service', 'ha_get_state', 'ha_list_entities', 'ha_list_services')
         conduit = ('conduit_call_user', 'conduit_call_watch', 'conduit_settings', 'conduit_watch_report')
+        web = ('web_search', 'web_extract')
         policy = VoicePolicy((
             CapabilityRegistration('voice_handoff', 'handoff', ('hermes_api',), 'proposal_only', (), True),
             CapabilityRegistration('home_assistant', 'Home Assistant tools approved for voice', homeassistant, 'direct_tool_access', (), True),
             CapabilityRegistration('conduit', 'Conduit tools approved for voice', conduit, 'direct_tool_access', (), True),
+            CapabilityRegistration('web_search', 'Read-only web search', web, 'read_only', (), True),
         ))
         client = Mock()
         client.get_capabilities.return_value = {'ok': True}
-        client.get_enabled_tool_inventory.return_value = frozenset(homeassistant + conduit)
+        client.get_enabled_tool_inventory.return_value = frozenset(homeassistant + conduit + web)
         client.get_or_create_voice_session.return_value = 'voice-session'
         client.submit_voice_request.return_value = Mock(status='accepted', session_id='voice-session')
         bridge._HANDOFF_CACHE.clear()

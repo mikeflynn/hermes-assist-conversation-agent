@@ -46,7 +46,12 @@ class VoicePolicyTests(unittest.TestCase):
         self.assertEqual(policy.allowed_tools(), {
             "ha_call_service", "ha_get_state", "ha_list_entities", "ha_list_services",
             "conduit_call_user", "conduit_call_watch", "conduit_settings", "conduit_watch_report",
+            "web_search", "web_extract",
         })
+        for tool in ("web_search", "web_extract"):
+            self.assertTrue(policy.authorize("web_search", tool, "read", None))
+            self.assertFalse(policy.authorize("web_search", tool, "execute", None))
+            self.assertFalse(policy.authorize("web_search", tool, "write", None))
 
     def test_rejects_duplicate_capability_ids(self):
         with self.assertRaises(ValueError):

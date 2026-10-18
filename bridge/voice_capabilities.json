@@ -33,6 +33,14 @@
       "access": "direct_tool_access",
       "resource_scope": [],
       "voice_enabled": true
+    },
+    {
+      "capability_id": "web_search",
+      "description": "Allow read-only web search and page extraction for current voice answers.",
+      "tools": ["web_search", "web_extract"],
+      "access": "read_only",
+      "resource_scope": [],
+      "voice_enabled": true
     }
   ]
 }

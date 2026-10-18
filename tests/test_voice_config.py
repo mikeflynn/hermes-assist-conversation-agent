@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from bridge import bridge
+from bridge.voice_policy import CapabilityRegistration, VoicePolicy
 
 
 class VoiceConfigTests(unittest.TestCase):
@@ -27,12 +28,20 @@ class VoiceConfigTests(unittest.TestCase):
             with self.subTest(suffix=suffix), self.env(HERMES_API_URL="http://" + suffix):
                 self.assertIsNone(bridge.get_voice_client())
 
-    def test_requires_exactly_no_mcp_config(self):
-        for toolsets in (None, ["filesystem"], ["no_mcp", "hermes-api-server"], ["no_mcp", "terminal"]):
+    def test_accepts_only_no_mcp_without_a_web_capability(self):
+        for toolsets in (None, ["filesystem"], ["no_mcp", "hermes-api-server"], ["no_mcp", "terminal"], ["no_mcp", "search"], ["no_mcp", "web", "web"]):
             with self.subTest(toolsets=toolsets), self.env(), patch.object(bridge, "_configured_api_toolsets", return_value=toolsets):
                 self.assertIsNone(bridge.get_voice_client())
         with self.env(), patch.object(bridge, "_configured_api_toolsets", return_value=["no_mcp"]):
             self.assertIsNotNone(bridge.get_voice_client())
+
+    def test_web_toolset_requires_registered_read_only_search_and_extract(self):
+        web_policy = VoicePolicy((CapabilityRegistration("web_search", "Read-only web lookup", ("web_search", "web_extract"), "read_only", (), True),))
+        for toolsets in (["no_mcp", "web"], ["web", "no_mcp"]):
+            with self.subTest(toolsets=toolsets), self.env(), patch.object(bridge, "_configured_api_toolsets", return_value=toolsets):
+                self.assertIsNone(bridge.get_voice_client())
+            with self.subTest(toolsets=toolsets, registry="enabled"), self.env(), patch.object(bridge, "_configured_api_toolsets", return_value=toolsets), patch.object(bridge, "get_voice_policy", return_value=web_policy):
+                self.assertIsNotNone(bridge.get_voice_client())
 
     def test_registry_is_empty_by_default_and_unreadable_registry_fails_closed(self):
         with tempfile.TemporaryDirectory() as home, self.env(HERMES_HOME=home):

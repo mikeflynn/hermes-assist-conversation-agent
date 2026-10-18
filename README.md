@@ -22,7 +22,7 @@ The integration and bridge communicate over HTTP:
 - `GET /health` — bridge health check used during setup
 - `POST /api/chat` — authenticated chat endpoint used by the conversation agent
 
-Ordinary questions, research requests, and clear simple Home Assistant commands are answered synchronously and spoken through Assist. Only requests that need confirmation, or requests explicitly directed to the **Voice Requests** session, are handed off there. A longer answer alone is not a reason to hand off. See [the routing and secure setup notes](docs/voice-requests-setup.md).
+Ordinary questions, research requests, and clear simple Home Assistant commands are answered synchronously and spoken through Assist. Current or time-sensitive questions (for example, sports scores) use read-only web search when enabled. Only requests that need confirmation, or requests explicitly directed to the **Voice Requests** session, are handed off there. A longer answer alone is not a reason to hand off. See [the routing and secure setup notes](docs/voice-requests-setup.md).
 
 ## HACS installation
 
