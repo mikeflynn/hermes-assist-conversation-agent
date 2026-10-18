@@ -1,37 +1,39 @@
 # Voice Requests Handoff — Design
 
-**Status:** Proposed design; implementation not yet approved.
+**Status:** Historical proposal. The approved routing contract is now documented in `docs/voice-requests-setup.md`; the future service ideas below are not part of the current voice scope.
 
 ## Goal
 
-Extend the existing Home Assistant (HA) voice path so Mike can ask for work beyond the existing calendar/Things briefs and device-control routing, while handing advanced or unsupported tasks into a dedicated Hermes app session for follow-up. The architecture must support future capabilities without feature-specific changes to the HA bridge each time, and must make voice responses explicit about what it can do, cannot do, or has handed off.
+Keep ordinary questions, research requests, and clear simple Home Assistant commands on the synchronous voice path so Assist can speak their answers immediately. Use the persistent Hermes **Voice Requests** session only for work that needs confirmation or when Mike explicitly asks for that destination; answer length by itself is not a handoff reason.
 
 ## User-approved constraints
 
-- HA should continue handling its own device state/control intents before sending unmatched requests to Hermes.
+- The HA custom conversation integration forwards Assist requests to the bridge; the bridge handles cached briefs and uses the synchronous Hermes API for ordinary questions and clear simple device commands.
 - Existing calendar and Things cache-backed behavior remains intact.
-- Advanced requests appear in a dedicated **Voice Requests** session in the Hermes app.
-- Voice-originated requests must not perform external/system writes. The explicit exception is Obsidian: voice may read and write within the vault's `Agent` folder and may read (but not write) elsewhere in the vault. Destructive Obsidian actions and writes outside `Agent` require Hermes app follow-up and approval.
+- Requests needing confirmation, and requests explicitly directed there by Mike, appear in a dedicated **Voice Requests** session in the Hermes app.
+- Direct tool access is limited to the exact Home Assistant and Conduit tools enabled in `bridge/voice_capabilities.json`. The registry grants access but does not itself provide per-call approval; confirmation-sensitive requests are routed to the session before the inline model call whenever the bridge classifier recognizes them.
 - Future capabilities should be registered through a generic policy/capability mechanism rather than hard-coded into the bridge.
 - Spoken replies should clearly distinguish completed answers, unsupported requests, and work that needs the Hermes session or user approval.
 
 ## Current state
 
-The HA custom conversation integration forwards text to `bridge.py` at `/api/chat` and returns its `reply` text to Assist. The bridge currently runs a one-shot `hermes chat -q` call by default, not a persistent Hermes app session. It has no generic handoff/session routing. The local API server setting was not present at inspection time. The bridge's current empty `HERMES_ASSIST_TOOLSETS` means the CLI path inherits normal Hermes CLI tools; this is too broad for a voice-only trust boundary. There are pre-existing uncommitted changes in `bridge/bridge.py` and `README.md`; implementation must preserve them and avoid staging them accidentally.
+At the time of the original inspection, the HA custom conversation integration forwarded text to `bridge.py` at `/api/chat`, and the routing always handed requests to Voice Requests. The approved implementation changes that behavior: the bridge now answers ordinary turns synchronously through `/v1/chat/completions` and uses `/v1/runs` only for handoff. The live API server/profile and exact tool inventory must still be verified before use.
 
 ## Proposed architecture
 
 ### Request flow
 
-1. HA retains first opportunity to handle device intents. The current calendar/Things brief logic remains unchanged.
-2. The bridge classifies the remaining request using registered capability metadata and a conservative default policy. It must not infer permission from a skill description or model-generated reasoning alone.
-3. The bridge returns one of a small explicit set of outcomes:
-   - **Answered:** a registered read-only capability completed the request.
+1. Calendar, Things, and news brief requests keep their cache-backed read-only behavior.
+2. Other ordinary questions, research requests, and clear simple device commands run synchronously through `/v1/chat/completions`; the returned text is sent directly to Assist. Answer length alone never triggers a handoff.
+3. The bridge routes explicit Voice Requests destinations, explicit confirmation requests, and known confirmation-sensitive action classes to the persistent session. The inline model is also instructed to return a transport-only `HANDOFF_REQUIRED:` marker before acting when confirmation is required.
+4. Direct API access requires an exact match between the authenticated enabled-tool inventory and `bridge/voice_capabilities.json`; no unregistered tools are available to voice.
+5. The bridge returns one of a small explicit set of outcomes:
+   - **Answered:** a cached brief or synchronous voice turn produced a response for Assist.
    - **Handed off:** the request is represented in the dedicated Voice Requests Hermes session and needs attention there.
    - **Unsupported:** no registered capability can handle it; the spoken response says so plainly and may offer the Hermes session as the next step.
    - **Unavailable/error:** the handoff or capability failed; the response must not imply success.
-4. The Hermes session stores enough context to pick up the request. Use a persistent session identifier and concise transcript/context; avoid sending unrelated HA history or secrets.
-5. For write-capable work outside the scoped Obsidian `Agent` exception, the voice-originated turn may prepare a proposal but cannot execute the mutation. Mike continues in the Hermes app and explicitly confirms the exact action there. Approval is bound to the displayed operation and parameters, not a generic or ambiguous spoken confirmation.
+6. Only handoffs use the persistent Voice Requests session; synchronous API turns do not target that pinned session, though Hermes may retain them according to its normal API chat-session behavior.
+7. Do not describe the registry or prompt as a universal approval sandbox: the bridge classifier and model instruction handle confirmation routing, while the registered direct tools themselves remain callable on an explicit clear request.
 
 ### Capability and policy registry
 
@@ -52,29 +54,28 @@ Use Hermes' supported API/session mechanism rather than spawning a new unrelated
 
 If the existing Desktop does not surface the required approval event, implement a minimal app-side review surface or use a proposal-only handoff that requires Mike to initiate the write after taking over. Do not substitute prompt instructions for an enforced write boundary. Do not configure unattended approval for the voice-originated path.
 
-### Initial capability scope
+### Current capability scope
 
-- Existing Things/calendar briefs: preserve current behavior.
-- Home Assistant device commands: remain with HA's own intent handling; do not expose additional device-control capability through this voice fallback.
-- Web search: registered read-only capability.
-- Obsidian: voice may read/write only within the `Agent` folder; voice may read-only access the rest of the vault. Write tools must enforce the path boundary, not merely rely on prompt instructions. Deletion and bulk destructive operations remain approval-gated.
-- Invoice Ninja: begin with read-only lookup. Mutations remain blocked in the voice-originated turn until app takeover/approval. Use a narrowly scoped API credential and verify writes by reading the exact record back after approved execution.
+- Existing calendar/Things/news briefs: preserve their read-only cache-backed behavior.
+- Home Assistant and Conduit: only the eight currently approved tools in `bridge/voice_capabilities.json` are exposed; clear simple requests are handled on the synchronous path.
+- Additional services (including web search, Obsidian, or Invoice Ninja) are future proposals only. They require separate explicit policy approval, implementation, and verification before being enabled for voice.
 
 ## Voice response behavior
 
 Responses must be concise and speech-friendly, and state what happens next. Examples (wording may vary):
 
-- Read-only success: “I found the client record. I’ve sent the details to your Hermes session.”
-- Needs app follow-up: “I can prepare that, but it needs to be handled in the Voice Requests session. I haven’t changed anything.”
+- Read-only success: “The lights in the boy’s room are on.”
+- Clear simple device action: “Done. The hallway lights are off.”
+- Explicit handoff/confirmation: “I sent that to your Voice Requests session.”
 - Unsupported: “I can’t do that from the voice assistant. I haven’t taken action.”
 - Handoff failed: “I couldn’t send that to Hermes, so nothing was started.”
 
-Only say a request was handed off after the session write is confirmed. Never describe a proposed operation as completed. If capability classification is uncertain, default to a clear handoff or unsupported response, not a mutation.
+Only say a request was handed off after the session write is confirmed. Never describe a proposed operation as completed. Long answers and research requests remain inline; only explicit session requests and confirmation-sensitive work are handed off.
 
 ## Security and operational requirements
 
-- Voice-originated tools are allowlisted; no inherited full CLI defaults. Exclude terminal, arbitrary code execution, broad filesystem writes, and HA control from the voice path unless a future reviewed policy explicitly changes scope.
-- Obsidian access is path-scoped: read/write in `Agent`, read-only elsewhere, and destructive operations approval-gated. Enforce this in the tool/adapter itself. Invoice Ninja reads/writes use separate least-privilege credentials where supported.
+- Voice-originated tools are allowlisted; no inherited full CLI defaults. Exclude terminal, arbitrary code execution, and broad filesystem writes. The currently approved voice API inventory is limited to the exact Home Assistant and Conduit tools registered in `bridge/voice_capabilities.json`; additions require explicit policy authorization and a matching live-inventory check.
+- Do not enable future integrations such as Obsidian or Invoice Ninja for voice until they have their own explicitly reviewed policy entries and implementation.
 - Keep API keys out of prompts, logs, and speech. Authenticate bridge-to-Hermes API calls; bind services to trusted interfaces and use TLS/access controls when traffic crosses an untrusted network.
 - Preserve request IDs and use idempotency/deduplication for handoffs and later writes to prevent retries from creating duplicate records.
 - Bound request length, history, concurrency, and runtime. Ensure truncation cannot remove the user's current request while retaining stale history.
@@ -88,16 +89,15 @@ Only say a request was handed off after the session write is confirmed. Never de
 
 ## Verification and acceptance criteria
 
-- HA device intents and current Things/calendar responses still take their existing paths.
-- A registered web-search request and Obsidian reads succeed through voice; voice can create/update notes only inside `Agent`, and cannot write elsewhere in the vault.
-- A request for an Invoice Ninja create/update is handed off; the record remains unchanged until Mike takes over and confirms in Hermes.
-- Destructive Obsidian operations and writes outside `Agent` are handed off; ordinary note reads and scoped `Agent` note creates/updates work by voice.
-- The dedicated session is visible and continuable in the installed Hermes Desktop; pending approval behavior is tested, not assumed.
+- Cached calendar, Things, and news responses remain available.
+- A read-only Home Assistant state question returns its spoken answer synchronously without submitting a Voice Requests run.
+- A clear simple Home Assistant command returns its spoken result synchronously without submitting a Voice Requests run.
+- Research requests remain inline even when their response is longer than a quick fact.
+- Explicit Voice Requests destinations and confirmation-sensitive tasks are handed off; the transport marker is never spoken.
+- Inline answers and handoffs both require the live enabled-tool inventory to exactly match the registry.
 - Unsupported requests, API outages, timeouts, and failed handoffs produce truthful spoken responses and never claim completion.
-- Adding a capability backed by an already registered tool requires policy/config registration but no bridge-specific feature branch.
-- Unregistered tools/capabilities are denied by default; test prompt injection, repeated delivery, oversized history, and duplicate handoff/write attempts.
-- The existing uncommitted bridge and README changes are preserved.
+- Unregistered tools are denied by default; request history is bounded and the current utterance is not duplicated in the inline message history.
 
 ## Implementation boundary
 
-Expected bridge changes: capability/policy loading, request routing, persistent-session handoff, structured outcomes converted into speech-friendly replies, and safety/time/idempotency handling. The HA custom integration should remain unchanged if its existing `reply` contract is sufficient; change it only if verified API behavior requires an explicit handoff/result field. Hermes API server configuration and an app-side approval surface may be needed after compatibility testing. Do not implement Invoice Ninja writes as part of the first voice-path milestone.
+Expected bridge changes: capability/policy loading, synchronous answer routing, explicit/confirmation-sensitive persistent-session handoff, structured outcomes converted into speech-friendly replies, and timeout/idempotency handling. The HA custom integration should remain unchanged while its existing `reply` contract is sufficient. Hermes API server configuration and Desktop approval behavior must be verified separately. The broader service ideas in this historical proposal are not included in the current approved scope.

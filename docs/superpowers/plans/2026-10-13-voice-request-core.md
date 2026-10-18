@@ -16,7 +16,7 @@
 - Voice may write only inside Obsidian `Agent`; all other writes require Hermes app takeover and approval.
 - Unregistered capabilities are unavailable to voice by default; skill prose is not a permission grant.
 - Voice replies must clearly distinguish answered, handed off, unsupported, and unavailable/error outcomes.
-- No inherited full CLI tools; exclude terminal, arbitrary code execution, broad filesystem writes, and HA control from voice.
+- No inherited full CLI tools; exclude terminal, arbitrary code execution, and broad filesystem writes. The currently user-approved voice API inventory is exactly the Home Assistant and Conduit tools listed in `bridge/voice_capabilities.json`; any additional tool requires explicit policy registration and a matching live-inventory review.
 - Preserve pre-existing uncommitted changes in `bridge/bridge.py` and `README.md`.
 
 ## Review Focus
@@ -74,37 +74,44 @@
 **Files:**
 - Create: `bridge/voice_responses.py`
 - Modify: `bridge/bridge.py`
+- Modify: `bridge/hermes_api.py` (public enabled-tool inventory check for Task 3 runtime policy enforcement)
 - Test: `tests/test_voice_responses.py`
 - Test: `tests/test_bridge.py`
+- Test: `tests/test_hermes_api.py`
 
 **Interfaces:**
 - `VoiceOutcome(status, spoken_reply, request_id=None, session_id=None)` has status `answered`, `handed_off`, `unsupported`, or `unavailable`.
 - `format_spoken_reply(outcome) -> str` returns concise speech text.
 - The existing `POST /api/chat` response retains the `reply` field consumed by the HA integration; additional fields may be added but are not required by HA.
+- `HermesApiClient.get_enabled_tool_inventory() -> frozenset[str]` validates authenticated `GET /v1/toolsets` and returns concrete tools from enabled, enumerable toolsets; malformed or unknown inventory fails closed. Before `POST /v1/runs`, the bridge requires this inventory to equal `VoicePolicy.allowed_tools()` exactly. Task 4 must explicitly disable default MCP inheritance (`no_mcp`) because `/v1/toolsets` does not report default MCP servers.
+- Generic Voice Requests session submission is a core transport, not an optional capability. It is permitted only after the tool-inventory gate passes; an empty optional registry permits a no-tools session run but no external tools.
 
-- [ ] **Step 1: Write failing tests** for each outcome, confirmed-vs-failed handoffs, unsupported requests, duplicate requests, and reply truncation preserving the current user text.
-- [ ] **Step 2: Run `python3 -m unittest discover -s tests -p 'test_voice_responses.py' -v` and `python3 -m unittest discover -s tests -p 'test_bridge.py' -v`** and confirm failures identify missing outcome behavior.
-- [ ] **Step 3: Implement the outcome formatter and update bridge routing** to keep calendar/Things handling, enforce the policy registry, use the persistent Hermes session, and return a handoff response only after the API confirms storage.
-- [ ] **Step 4: Bound request/history/concurrency; retain the current utterance when trimming history.** Do not expose auth headers, secrets, or raw internal exceptions in spoken replies.
+- [ ] **Step 1: Write failing tests** for each outcome, confirmed-vs-failed handoffs, unsupported requests, enabled-tool inventory match/mismatch, duplicate retries versus a later identical utterance, state-path isolation, and actual submitted context preserving the current user text.
+- [ ] **Step 2: Run `python3 -m unittest discover -s tests -p 'test_voice_responses.py' -v`, `python3 -m unittest discover -s tests -p 'test_bridge.py' -v`, and `python3 -m unittest discover -s tests -p 'test_hermes_api.py' -v`** and confirm failures identify missing outcome, inventory, idempotency, and routing behavior.
+- [ ] **Step 3: Implement the outcome formatter and bridge routing** to keep calendar/Things handling, use the persistent Hermes session, and report handoff only after API confirmation. Treat generic session submission as the core transport; before every run, require the concrete enabled API tool inventory to equal the registered tool names exactly. A missing API server, mismatch, or malformed inventory fails closed; no optional tool is available from an empty registry.
+- [ ] **Step 4: Bound request/history/concurrency and deduplication**; derive a stable request identity for retries while distinguishing later identical utterances, key local cache entries by the state/session identity and request, and cap/expire that cache. Retain the current utterance when trimming history and assert at the actual submit boundary that it is present. Do not expose auth headers, secrets, or raw internal exceptions in spoken replies.
 - [ ] **Step 5: Run the focused tests and full suite** with `python3 -m unittest discover -s tests -v`.
 - [ ] **Step 6: Commit** as `feat: route voice requests to Hermes sessions`.
 
 ### Task 4: Runtime configuration and end-to-end compatibility gate
 
 **Files:**
+- Modify: `bridge/bridge.py` (runtime configuration validation and fail-closed client construction)
 - Modify: `README.md`
 - Create: `docs/voice-requests-setup.md`
 - Test: `tests/test_voice_config.py`
 
 **Interfaces:**
-- Document environment/config inputs: API base URL, API key source, capability registry path, state path, request timeout, and explicitly allowed API-server tools.
-- Default configuration denies optional tools and writes; `Agent`-scoped Obsidian access is added only by its separate plan.
+- Use `HERMES_API_URL` and `HERMES_API_KEY` (secret) from the bridge environment. Accept HTTP/HTTPS only for `localhost` or a literal loopback IP; reject URL userinfo, query, or fragment. Use `HERMES_API_TIMEOUT_SECONDS` (default `10`, integer range `1..30`).
+- Use `HERMES_VOICE_STATE_PATH`; default to `$HERMES_HOME/voice_requests_state.json`, falling back to `~/.hermes/voice_requests_state.json` only when `HERMES_HOME` is unset. Use optional `HERMES_VOICE_POLICY_FILE`; absent means an empty optional-tool registry, present-but-unreadable or malformed fails closed via `VoicePolicy.from_file`.
+- Read `platform_toolsets.api_server` from the same active Hermes home/profile through a read-only Hermes config interface. At this core stage require a one-item explicit list containing only `no_mcp`; any additional toolset (including a broad composite), config lookup failure, or malformed value disables the API client. Future capability plans may extend the toolset allowlist only alongside their adapter and enforcement tests. The authenticated concrete tool inventory must still exactly match `VoicePolicy.allowed_tools()` before each run; the endpoint alone cannot prove MCP is disabled.
+- Default configuration denies optional tools and writes; `Agent`-scoped Obsidian access is added only by its separate plan. This task must not edit Hermes runtime configuration, start the API server, or create credentials.
 
-- [ ] **Step 1: Write failing config tests** for missing API credentials, unsafe/broad tool selections, unknown registry entries, and invalid timeouts.
+- [ ] **Step 1: Write failing config tests** for missing API credentials, non-loopback URLs, URL userinfo/query/fragment, unsafe/broad tool selections, missing or unreadable `no_mcp` config, unknown registry entries, invalid timeouts, and profile-safe default state/policy paths.
 - [ ] **Step 2: Run `python3 -m unittest discover -s tests -p 'test_voice_config.py' -v`** and verify the tests fail because configuration validation is absent.
 - [ ] **Step 3: Implement fail-closed configuration validation** and document secure local setup. Do not commit secrets or overwrite existing README edits; patch only the relevant section.
 - [ ] **Step 4: Run all tests and `git diff --check`**; inspect the diff to confirm the pre-existing `README.md` and `bridge.py` changes remain intact.
-- [ ] **Step 5: Verify manually** that the API-server tool inventory excludes disallowed tools; use a harmless approval-gated test tool to confirm pending approval reaches Desktop, or confirm the proposal-only fallback. Verify HA device commands and calendar/Things requests retain their existing paths; verify API-down and unsupported requests produce the right spoken replies.
+- [ ] **Step 5: Run read-only/manual compatibility checks only against an already-running loopback API server whose same-profile config already includes `no_mcp`.** Verify tool inventory, session visibility/continuation, pending-approval or proposal-only behavior, and that HA device commands, calendar/Things, API-down, and unsupported paths retain expected behavior. Do not enable/configure/start the API server or invoke an approval-gated tool; if no pre-existing safe server exists, record the live gate as blocked pending user authorization.
 - [ ] **Step 6: Commit** as `docs: configure voice request handoff`.
 
 ## Exit gate

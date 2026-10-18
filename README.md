@@ -22,6 +22,8 @@ The integration and bridge communicate over HTTP:
 - `GET /health` — bridge health check used during setup
 - `POST /api/chat` — authenticated chat endpoint used by the conversation agent
 
+Ordinary questions, research requests, and clear simple Home Assistant commands are answered synchronously and spoken through Assist. Current or time-sensitive questions (for example, sports scores) use read-only web search when enabled. Only requests that need confirmation, or requests explicitly directed to the **Voice Requests** session, are handed off there. A longer answer alone is not a reason to hand off. See [the routing and secure setup notes](docs/voice-requests-setup.md).
+
 ## HACS installation
 
 This repository must be **public** for HACS to use it.
@@ -102,6 +104,10 @@ Supported bridge environment variables:
 - The bridge requires an Authorization header containing the configured bridge key for `/api/chat`.
 - Keep the bridge reachable only by trusted systems or protect it behind your own network controls.
 - Review the bridge's enabled Hermes toolsets before exposing it to voice input.
+
+For the separate, fail-closed Voice Requests API setup—including loopback-only
+API URLs, the required `no_mcp` toolset sentinel, profile selection, and secret
+handling—see [Voice Requests secure setup](docs/voice-requests-setup.md).
 
 ## Copyright and license
 

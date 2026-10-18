@@ -16,9 +16,27 @@ import subprocess
 import sys
 import threading
 import time
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+import hashlib
+import ipaddress
+import shutil
+import urllib.parse
+from collections import OrderedDict
+
+from .voice_responses import VoiceOutcome, format_spoken_reply
+from .voice_policy import VoicePolicy
+
+_HANDOFF_CACHE: OrderedDict[str, tuple[float, VoiceOutcome]] = OrderedDict()
+HANDOFF_CACHE_TTL = 300
+HANDOFF_CACHE_MAX = 512
+VOICE_POLICY = VoicePolicy(())
+_HANDOFF_LOCK = threading.Lock()
+MAX_REQUEST_CHARS = 6000
+MAX_CONTEXT_CHARS = 12000
+MAX_CONCURRENT_HANDOFFS = threading.BoundedSemaphore(4)
 
 HOST = os.environ.get("HERMES_ASSIST_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HERMES_ASSIST_PORT", "8765"))
@@ -50,6 +68,7 @@ NEWS_BRIEF_PATH = os.environ.get(
 
 SYSTEM_PROMPT = f"""You are Hermes Agent answering through Home Assistant Assist.
 Keep replies concise and speech-friendly. Avoid Markdown tables and visual-only instructions.
+Use web_search for current or time-sensitive facts (such as sports scores, live results, and standings) when available, and name the source. Report dates and times as the source states them, including its timezone; do not infer or shift calendar dates.
 Use the recent conversation context to resolve pronouns and follow-up questions.
 Safety: do not unlock doors, disable alarms, delete/send email, or make broad smart-home changes unless the spoken request is explicit and unambiguous. If unsure, ask a short clarifying question.
 For ordinary device-control phrases that Home Assistant should handle directly, say briefly that this command should be routed to Home Assistant's built-in agent unless you can safely complete it with your available tools.
@@ -69,6 +88,40 @@ News handling:
 - Do not browse live news, fetch RSS feeds, or use execute_code for news requests; the morning news job already performs that read-only refresh.
 - Treat the brief's 24-hour window, source failures, and freshness metadata as authoritative. If missing or stale, say the news brief is unavailable rather than attempting a live refresh.
 """
+
+INLINE_VOICE_INSTRUCTIONS = """You are responding to the user through a voice assistant.
+Answer in concise, natural speech. Use the available tools when useful for answering a question or carrying out a clear, simple request.
+For current or time-sensitive facts (including sports scores, news, and live results), use web_search instead of relying on memory when the tool is available. Name the source, repeat any date/time and timezone as stated by that source, and do not infer or shift calendar dates. Distinguish live from final results, and say plainly when search results are unclear or unavailable.
+Do not hand off merely because a request needs research or a longer answer; summarize it concisely and answer now.
+Do not perform destructive, financial, external-message, broad-setting, or otherwise confirmation-required actions without the user's confirmation. If confirmation is needed, do not call tools; reply only with HANDOFF_REQUIRED: followed by a brief reason. The bridge will forward that request to the Voice Requests session.
+Never claim an action succeeded unless the relevant tool confirms it. Ask a short clarifying question rather than guessing when the target or requested action is ambiguous.
+"""
+
+_SESSION_MENTION_RE = re.compile(r"\bvoice requests?(?: session)?\b", re.IGNORECASE)
+_SESSION_DIRECTIVE_RE = re.compile(r"\b(?:send|put|save|add|move|continue|forward|hand\s*off|handoff|answer|respond|reply|handle|keep)\b", re.IGNORECASE)
+_CONFIRMATION_RE = re.compile(
+    r"\b(?:ask me (?:for )?(?:confirmation|approval)(?: first)?|ask me before|check with me before|"
+    r"confirm with me before|wait for my (?:confirmation|approval)|get my (?:confirmation|approval)|"
+    r"need(?:s)? my (?:confirmation|approval)|until i approve|before you (?:do|make|send|delete|change))\b",
+    re.IGNORECASE,
+)
+_INFORMATION_REQUEST_RE = re.compile(
+    r"^(?:how (?:do|can) i\b|what (?:does|is|are)\b|why\b|should i\b|what happens if\b|explain\b)",
+    re.IGNORECASE,
+)
+_HIGH_IMPACT_ACTION_RE = re.compile(
+    r"\b(?:delete|remove|buy|purchase|order|pay|transfer|publish|post|submit|cancel)\b",
+    re.IGNORECASE,
+)
+_EXTERNAL_MESSAGE_RE = re.compile(
+    r"\bsend\b.{0,80}\b(?:email|message|text|attachment|file|document)\b|"
+    r"\b(?:email|text)\s+(?:to\s+)?(?:my|him|her|them|me)\b",
+    re.IGNORECASE,
+)
+_RESOURCE_WRITE_RE = re.compile(
+    r"\b(?:create|change|edit|update|set|schedule)\b.{0,80}\b(?:settings?|notes?|files?|documents?|invoices?|calendar|events?|appointments?|reminders?|meetings?)\b",
+    re.IGNORECASE,
+)
 
 _AGENT = None
 _AGENT_LOCK = threading.Lock()
@@ -155,6 +208,220 @@ def format_history(data: dict[str, Any], current_text: str) -> str:
     if not lines:
         return ""
     return "Recent conversation, oldest to newest:\n" + "\n".join(lines[-MAX_HISTORY_MESSAGES:]) + "\n"
+
+
+def format_chat_history(data: dict[str, Any], current_text: str) -> list[dict[str, str]]:
+    """Return recent user/assistant turns without duplicating the current utterance."""
+    chat_log = data.get("chat_log")
+    items = chat_log.get("content") if isinstance(chat_log, dict) else None
+    if not isinstance(items, list):
+        return []
+    messages: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = _content_text(item)
+        if not content or (role == "user" and content.strip().lower() == current_text.strip().lower()):
+            continue
+        messages.append({"role": role, "content": content[:600]})
+    return messages[-max(0, MAX_HISTORY_MESSAGES):] if MAX_HISTORY_MESSAGES else []
+
+
+def build_voice_context(current_text: str, history: str) -> str:
+    return (history or "")[-MAX_CONTEXT_CHARS:] + "\nUser said: " + current_text[:MAX_REQUEST_CHARS]
+
+
+def handoff_request(client, state_path: str, request_id: str, text: str, context: str) -> VoiceOutcome:
+    if not request_id or len(text) > MAX_REQUEST_CHARS:
+        return VoiceOutcome("unsupported", "I can't do that from the voice assistant. I haven't taken action.", request_id)
+    key = hashlib.sha256(json.dumps([str(Path(state_path).expanduser().resolve()), request_id, text, context], ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+    with _HANDOFF_LOCK:
+        now = time.monotonic()
+        for old_key, (created, _) in list(_HANDOFF_CACHE.items()):
+            if now - created > HANDOFF_CACHE_TTL:
+                del _HANDOFF_CACHE[old_key]
+        cached = _HANDOFF_CACHE.get(key)
+        if cached is not None:
+            _HANDOFF_CACHE.move_to_end(key)
+            return cached[1]
+        if not MAX_CONCURRENT_HANDOFFS.acquire(False):
+            return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+        try:
+            session_id = client.get_or_create_voice_session(state_path)
+            bounded_context = (context or "")[-MAX_CONTEXT_CHARS:]
+            if text not in bounded_context:
+                bounded_context = (bounded_context + "\nUser said: " + text[:MAX_REQUEST_CHARS])[-MAX_CONTEXT_CHARS:]
+            result = client.submit_voice_request(session_id, request_id, text, {"source": "voice", "history": bounded_context})
+            if getattr(result, "status", None) != "accepted" or getattr(result, "session_id", None) != session_id:
+                return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+            outcome = VoiceOutcome("handed_off", "I sent that to your Voice Requests session.", request_id, session_id)
+            _HANDOFF_CACHE[key] = (now, outcome)
+            _HANDOFF_CACHE.move_to_end(key)
+            while len(_HANDOFF_CACHE) > HANDOFF_CACHE_MAX:
+                _HANDOFF_CACHE.popitem(last=False)
+            return outcome
+        except Exception:
+            return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+        finally:
+            MAX_CONCURRENT_HANDOFFS.release()
+
+
+def get_voice_client():
+    base_url = os.environ.get("HERMES_API_URL", "").strip()
+    api_key = os.environ.get("HERMES_API_KEY", "").strip()
+    if not base_url or not api_key:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        host = parsed.hostname
+        if parsed.scheme not in {"http", "https"} or not host or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment or "?" in base_url or "#" in base_url:
+            return None
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = host.lower() == "localhost"
+        configured_toolsets = _configured_api_toolsets()
+        if configured_toolsets is None:
+            return None
+        safe_toolsets = (
+            configured_toolsets == ["no_mcp"]
+            or (len(configured_toolsets) == 2 and set(configured_toolsets) == {"no_mcp", "web"})
+        )
+        if not loopback or not safe_toolsets:
+            return None
+        timeout = int(os.environ.get("HERMES_API_TIMEOUT_SECONDS", "10"))
+        if not 1 <= timeout <= 30:
+            return None
+        if os.environ.get("HERMES_ASSIST_TOOLSETS", "").strip():
+            return None
+        policy = get_voice_policy()
+        web_registered = {"web_search", "web_extract"}.issubset(policy.allowed_tools())
+        if ("web" in configured_toolsets) != web_registered:
+            return None
+        from .hermes_api import HermesApiClient
+        client = HermesApiClient(base_url, api_key, timeout=timeout)
+        client.voice_policy = policy
+        return client
+    except Exception:
+        return None
+
+
+def _configured_api_toolsets():
+    """Read the active Hermes profile's API toolsets without changing config."""
+    executable = shutil.which("hermes")
+    if not executable:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, "config", "get", "--json", "platform_toolsets.api_server"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
+        )
+        if result.returncode != 0:
+            return None
+        value = json.loads(result.stdout)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return None
+        return value
+    except Exception:
+        return None
+
+
+def voice_state_path() -> str:
+    configured = os.environ.get("HERMES_VOICE_STATE_PATH")
+    if configured:
+        return str(Path(configured).expanduser())
+    home = os.environ.get("HERMES_HOME")
+    root = Path(home).expanduser() if home else Path.home() / ".hermes"
+    return str(root / "voice_requests_state.json")
+
+
+def voice_policy_path() -> str:
+    return os.environ.get("HERMES_VOICE_POLICY_FILE", "")
+
+
+def get_voice_policy() -> VoicePolicy:
+    path = voice_policy_path()
+    return VoicePolicy.from_file(path) if path else VoicePolicy(())
+
+
+def derive_request_id(conversation_id: str, text: str, history: str) -> str:
+    canonical = json.dumps([conversation_id or "", (history or "")[-MAX_CONTEXT_CHARS:], text[:MAX_REQUEST_CHARS]], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _cached_brief(text: str, calendar_path: str, things_path: str, news_path: str) -> VoiceOutcome | None:
+    lowered = text.lower()
+    if any(word in lowered for word in ("calendar", "schedule", "event")):
+        path = calendar_path
+    elif any(word in lowered for word in ("task", "todo", "to-do", "things", "need to do")):
+        path = things_path
+    elif any(word in lowered for word in ("news", "cybersecurity", "apple updates", "morning brief")):
+        path = news_path
+    else:
+        return None
+    try:
+        content = Path(path).expanduser().read_text(encoding="utf-8")[:4000]
+    except (OSError, ValueError):
+        content = ""
+    if not content.strip():
+        content = "That cached brief is unavailable."
+    return VoiceOutcome("answered", content.strip())
+
+
+def _requires_voice_handoff(text: str) -> bool:
+    """Keep long-but-answerable requests inline; hand off only explicit or approval-sensitive work."""
+    if _SESSION_MENTION_RE.search(text) and _SESSION_DIRECTIVE_RE.search(text):
+        return True
+    if _CONFIRMATION_RE.search(text):
+        return True
+    if _INFORMATION_REQUEST_RE.search(text):
+        return False
+    return bool(_HIGH_IMPACT_ACTION_RE.search(text) or _EXTERNAL_MESSAGE_RE.search(text) or _RESOURCE_WRITE_RE.search(text))
+
+
+def route_voice_request(text: str, client, policy: VoicePolicy, calendar_path: str, things_path: str, request_id: str = "request", context: str = "", news_path: str = NEWS_BRIEF_PATH, chat_history: list[dict[str, str]] | None = None) -> VoiceOutcome:
+    handoff = _requires_voice_handoff(text)
+    if handoff and policy.allowed_tools() and not policy.authorize("voice_handoff", "hermes_api", "read", None):
+        return VoiceOutcome("unsupported", "I can't do that from the voice assistant. I haven't taken action.", request_id)
+    if not handoff:
+        cached = _cached_brief(text, calendar_path, things_path, news_path)
+        if cached is not None:
+            return cached
+    if len(text) > MAX_REQUEST_CHARS:
+        return VoiceOutcome("unsupported", "That request is too long for the voice assistant. I haven't taken action.", request_id)
+    if client is None:
+        return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+    try:
+        client.get_capabilities()
+        inventory = client.get_enabled_tool_inventory()
+        if inventory != policy.allowed_tools():
+            return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+    except Exception:
+        return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
+    if handoff:
+        return handoff_request(client, voice_state_path(), request_id, text, context)
+    try:
+        answer = client.answer_voice_request(
+            request_id,
+            text,
+            history=chat_history or [],
+            instructions=INLINE_VOICE_INSTRUCTIONS,
+        )
+        answer = answer.strip() if isinstance(answer, str) else ""
+        if not answer:
+            return VoiceOutcome("unavailable", "I couldn't get a complete response from Hermes, so I can't confirm whether the request completed.", request_id)
+        if answer.startswith("HANDOFF_REQUIRED:"):
+            reason = answer.partition(":")[2].strip()[:300]
+            handoff_context = context
+            if reason:
+                handoff_context = (handoff_context + "\nBridge routing note: " + reason).strip()
+            return handoff_request(client, voice_state_path(), request_id, text, handoff_context)
+        return VoiceOutcome("answered", answer, request_id)
+    except Exception:
+        return VoiceOutcome("unavailable", "I couldn't get a complete response from Hermes, so I can't confirm whether the request completed.", request_id)
 
 
 def get_agent():
@@ -275,33 +542,16 @@ class Handler(BaseHTTPRequestHandler):
         extra_system_prompt = str(data.get("extra_system_prompt") or "")
         history = format_history(data, text)
 
-        prompt = (
-            f"{SYSTEM_PROMPT}\n"
-            f"Home Assistant context:\n"
-            f"- conversation_id: {conversation_id or 'none'}\n"
-            f"- language: {language or 'unknown'}\n"
-            f"- device_id: {device_id or 'unknown'}\n"
-        )
-        if extra_system_prompt:
-            prompt += f"- extra Home Assistant instruction: {extra_system_prompt[:1000]}\n"
-        if history:
-            prompt += f"\n{history}"
-        prompt += f"\nUser said: {text}\n\nReply with only the answer the user should hear."
-        prompt = prompt[:MAX_PROMPT_CHARS]
-
-        ok, output = call_hermes_direct(prompt) if USE_DIRECT_AGENT else call_hermes_cli(prompt)
-        if USE_DIRECT_AGENT and not ok:
-            ok, output = call_hermes_cli(prompt)
-
-        if not ok:
-            if output == "timeout":
-                json_response(self, 504, {"error": "timeout", "reply": "Sorry, Hermes took too long to answer."})
-            else:
-                json_response(self, 502, {"error": "hermes_failed", "detail": output[-2000:], "reply": "Sorry, Hermes failed."})
+        if len(text) > MAX_REQUEST_CHARS:
+            outcome = VoiceOutcome("unsupported", "That request is too long for the voice assistant. I haven't taken action.")
+            json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "conversation_id": conversation_id or None})
             return
-
-        output = output.strip() or "Hermes did not return a response."
-        json_response(self, 200, {"reply": output, "conversation_id": conversation_id or None})
+        request_id = str(data.get("request_id") or derive_request_id(conversation_id, text, history))
+        client = get_voice_client()
+        policy = getattr(client, "voice_policy", VOICE_POLICY)
+        outcome = route_voice_request(text, client, policy, CALENDAR_BRIEF_PATH, THINGS_BRIEF_PATH, request_id, format_history(data, text), NEWS_BRIEF_PATH, format_chat_history(data, text))
+        json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "request_id": outcome.request_id, "session_id": outcome.session_id, "conversation_id": conversation_id or None})
+        return
 
 
 def main() -> None:
