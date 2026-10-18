@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,39 @@ News handling:
 - Do not browse live news, fetch RSS feeds, or use execute_code for news requests; the morning news job already performs that read-only refresh.
 - Treat the brief's 24-hour window, source failures, and freshness metadata as authoritative. If missing or stale, say the news brief is unavailable rather than attempting a live refresh.
 """
+
+INLINE_VOICE_INSTRUCTIONS = """You are responding to the user through a voice assistant.
+Answer in concise, natural speech. Use the available tools when useful for answering a question or carrying out a clear, simple request.
+Do not hand off merely because a request needs research or a longer answer; summarize it concisely and answer now.
+Do not perform destructive, financial, external-message, broad-setting, or otherwise confirmation-required actions without the user's confirmation. If confirmation is needed, do not call tools; reply only with HANDOFF_REQUIRED: followed by a brief reason. The bridge will forward that request to the Voice Requests session.
+Never claim an action succeeded unless the relevant tool confirms it. Ask a short clarifying question rather than guessing when the target or requested action is ambiguous.
+"""
+
+_SESSION_MENTION_RE = re.compile(r"\bvoice requests?(?: session)?\b", re.IGNORECASE)
+_SESSION_DIRECTIVE_RE = re.compile(r"\b(?:send|put|save|add|move|continue|forward|hand\s*off|handoff|answer|respond|reply|handle|keep)\b", re.IGNORECASE)
+_CONFIRMATION_RE = re.compile(
+    r"\b(?:ask me (?:for )?(?:confirmation|approval)(?: first)?|ask me before|check with me before|"
+    r"confirm with me before|wait for my (?:confirmation|approval)|get my (?:confirmation|approval)|"
+    r"need(?:s)? my (?:confirmation|approval)|until i approve|before you (?:do|make|send|delete|change))\b",
+    re.IGNORECASE,
+)
+_INFORMATION_REQUEST_RE = re.compile(
+    r"^(?:how (?:do|can) i\b|what (?:does|is|are)\b|why\b|should i\b|what happens if\b|explain\b)",
+    re.IGNORECASE,
+)
+_HIGH_IMPACT_ACTION_RE = re.compile(
+    r"\b(?:delete|remove|buy|purchase|order|pay|transfer|publish|post|submit|cancel)\b",
+    re.IGNORECASE,
+)
+_EXTERNAL_MESSAGE_RE = re.compile(
+    r"\bsend\b.{0,80}\b(?:email|message|text|attachment|file|document)\b|"
+    r"\b(?:email|text)\s+(?:to\s+)?(?:my|him|her|them|me)\b",
+    re.IGNORECASE,
+)
+_RESOURCE_WRITE_RE = re.compile(
+    r"\b(?:create|change|edit|update|set|schedule)\b.{0,80}\b(?:settings?|notes?|files?|documents?|invoices?|calendar|events?|appointments?|reminders?|meetings?)\b",
+    re.IGNORECASE,
+)
 
 _AGENT = None
 _AGENT_LOCK = threading.Lock()
@@ -172,6 +206,26 @@ def format_history(data: dict[str, Any], current_text: str) -> str:
     if not lines:
         return ""
     return "Recent conversation, oldest to newest:\n" + "\n".join(lines[-MAX_HISTORY_MESSAGES:]) + "\n"
+
+
+def format_chat_history(data: dict[str, Any], current_text: str) -> list[dict[str, str]]:
+    """Return recent user/assistant turns without duplicating the current utterance."""
+    chat_log = data.get("chat_log")
+    items = chat_log.get("content") if isinstance(chat_log, dict) else None
+    if not isinstance(items, list):
+        return []
+    messages: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = _content_text(item)
+        if not content or (role == "user" and content.strip().lower() == current_text.strip().lower()):
+            continue
+        messages.append({"role": role, "content": content[:600]})
+    return messages[-max(0, MAX_HISTORY_MESSAGES):] if MAX_HISTORY_MESSAGES else []
 
 
 def build_voice_context(current_text: str, history: str) -> str:
@@ -306,12 +360,27 @@ def _cached_brief(text: str, calendar_path: str, things_path: str, news_path: st
     return VoiceOutcome("answered", content.strip())
 
 
-def route_voice_request(text: str, client, policy: VoicePolicy, calendar_path: str, things_path: str, request_id: str = "request", context: str = "", news_path: str = NEWS_BRIEF_PATH) -> VoiceOutcome:
-    cached = _cached_brief(text, calendar_path, things_path, news_path)
-    if cached is not None:
-        return cached
-    if policy.allowed_tools() and not policy.authorize("voice_handoff", "hermes_api", "read", None):
+def _requires_voice_handoff(text: str) -> bool:
+    """Keep long-but-answerable requests inline; hand off only explicit or approval-sensitive work."""
+    if _SESSION_MENTION_RE.search(text) and _SESSION_DIRECTIVE_RE.search(text):
+        return True
+    if _CONFIRMATION_RE.search(text):
+        return True
+    if _INFORMATION_REQUEST_RE.search(text):
+        return False
+    return bool(_HIGH_IMPACT_ACTION_RE.search(text) or _EXTERNAL_MESSAGE_RE.search(text) or _RESOURCE_WRITE_RE.search(text))
+
+
+def route_voice_request(text: str, client, policy: VoicePolicy, calendar_path: str, things_path: str, request_id: str = "request", context: str = "", news_path: str = NEWS_BRIEF_PATH, chat_history: list[dict[str, str]] | None = None) -> VoiceOutcome:
+    handoff = _requires_voice_handoff(text)
+    if handoff and policy.allowed_tools() and not policy.authorize("voice_handoff", "hermes_api", "read", None):
         return VoiceOutcome("unsupported", "I can't do that from the voice assistant. I haven't taken action.", request_id)
+    if not handoff:
+        cached = _cached_brief(text, calendar_path, things_path, news_path)
+        if cached is not None:
+            return cached
+    if len(text) > MAX_REQUEST_CHARS:
+        return VoiceOutcome("unsupported", "That request is too long for the voice assistant. I haven't taken action.", request_id)
     if client is None:
         return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
     try:
@@ -321,7 +390,27 @@ def route_voice_request(text: str, client, policy: VoicePolicy, calendar_path: s
             return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
     except Exception:
         return VoiceOutcome("unavailable", "I couldn't send that to Hermes, so nothing was started.", request_id)
-    return handoff_request(client, voice_state_path(), request_id, text, context)
+    if handoff:
+        return handoff_request(client, voice_state_path(), request_id, text, context)
+    try:
+        answer = client.answer_voice_request(
+            request_id,
+            text,
+            history=chat_history or [],
+            instructions=INLINE_VOICE_INSTRUCTIONS,
+        )
+        answer = answer.strip() if isinstance(answer, str) else ""
+        if not answer:
+            return VoiceOutcome("unavailable", "I couldn't get a complete response from Hermes, so I can't confirm whether the request completed.", request_id)
+        if answer.startswith("HANDOFF_REQUIRED:"):
+            reason = answer.partition(":")[2].strip()[:300]
+            handoff_context = context
+            if reason:
+                handoff_context = (handoff_context + "\nBridge routing note: " + reason).strip()
+            return handoff_request(client, voice_state_path(), request_id, text, handoff_context)
+        return VoiceOutcome("answered", answer, request_id)
+    except Exception:
+        return VoiceOutcome("unavailable", "I couldn't get a complete response from Hermes, so I can't confirm whether the request completed.", request_id)
 
 
 def get_agent():
@@ -449,7 +538,7 @@ class Handler(BaseHTTPRequestHandler):
         request_id = str(data.get("request_id") or derive_request_id(conversation_id, text, history))
         client = get_voice_client()
         policy = getattr(client, "voice_policy", VOICE_POLICY)
-        outcome = route_voice_request(text, client, policy, CALENDAR_BRIEF_PATH, THINGS_BRIEF_PATH, request_id, format_history(data, text), NEWS_BRIEF_PATH)
+        outcome = route_voice_request(text, client, policy, CALENDAR_BRIEF_PATH, THINGS_BRIEF_PATH, request_id, format_history(data, text), NEWS_BRIEF_PATH, format_chat_history(data, text))
         json_response(self, 200, {"reply": format_spoken_reply(outcome), "outcome": outcome.status, "request_id": outcome.request_id, "session_id": outcome.session_id, "conversation_id": conversation_id or None})
         return
 

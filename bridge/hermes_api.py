@@ -54,10 +54,10 @@ class HermesApiClient:
     def get_capabilities(self):
         data=self._request('GET','/v1/capabilities')
         endpoints=data.get('endpoints'); features=data.get('features')
-        required={'runs':('POST','/v1/runs'),'session_create':('POST','/api/sessions')}
+        required={'runs':('POST','/v1/runs'),'session_create':('POST','/api/sessions'),'chat_completions':('POST','/v1/chat/completions')}
         if data.get('object')!='hermes.api_server.capabilities' or not isinstance(features,dict) or not isinstance(endpoints,dict): raise HermesApiError('invalid capabilities response')
         idempotency=features.get('runs_idempotency')
-        if features.get('run_submission') is not True or not isinstance(idempotency,dict) or idempotency.get('supported') is not True:
+        if features.get('chat_completions') is not True or features.get('run_submission') is not True or not isinstance(idempotency,dict) or idempotency.get('supported') is not True:
             raise HermesApiError('invalid capabilities response')
         for name, expected in required.items():
             item=endpoints.get(name)
@@ -84,6 +84,40 @@ class HermesApiClient:
             if entry['enabled']:
                 tools.update(names)
         return frozenset(tools)
+
+    def answer_voice_request(self, request_id, text, history=None, instructions=None):
+        """Run a voice turn synchronously so Assist can speak the answer immediately."""
+        if not isinstance(request_id, str) or not request_id or not isinstance(text, str) or not text.strip():
+            raise HermesApiError('invalid inline voice request')
+        if history is None:
+            history = []
+        if not isinstance(history, list):
+            raise HermesApiError('invalid voice conversation history')
+        messages = []
+        if instructions:
+            if not isinstance(instructions, str):
+                raise HermesApiError('invalid voice instructions')
+            messages.append({'role': 'system', 'content': instructions})
+        for item in history:
+            if not isinstance(item, dict) or item.get('role') not in ('user', 'assistant') or not isinstance(item.get('content'), str):
+                raise HermesApiError('invalid voice conversation history')
+            messages.append({'role': item['role'], 'content': item['content']})
+        messages.append({'role': 'user', 'content': text})
+        payload = {'messages': messages, 'stream': False}
+        key_material = json.dumps([request_id, payload], sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        idempotency_key = hashlib.sha256(key_material.encode('utf-8')).hexdigest()
+        response = self._request('POST', '/v1/chat/completions', payload, idempotency_key)
+        choices = response.get('choices')
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise HermesApiError('invalid inline voice response')
+        choice = choices[0]
+        message = choice.get('message')
+        content = message.get('content') if isinstance(message, dict) else None
+        extras = response.get('hermes')
+        if (not isinstance(content, str) or not content.strip() or choice.get('finish_reason') != 'stop'
+                or (isinstance(extras, dict) and (extras.get('completed') is False or extras.get('partial') is True or extras.get('failed') is True))):
+            raise HermesApiError('incomplete inline voice response')
+        return content.strip()
 
     def get_or_create_voice_session(self, state_path):
         state=VoiceState(state_path)

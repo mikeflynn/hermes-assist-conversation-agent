@@ -12,6 +12,7 @@ class FakeHandler(BaseHTTPRequestHandler):
     mode = 'ok'
     caps = None
     inventory = None
+    completion = {'id': 'chatcmpl-1', 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'The lights are on.'}, 'finish_reason': 'stop'}]}
     def log_message(self, *args): pass
     def _reply(self, status, obj):
         data = json.dumps(obj).encode()
@@ -20,13 +21,14 @@ class FakeHandler(BaseHTTPRequestHandler):
         type(self).calls.append(('GET', self.path, self.headers.get('Authorization')))
         if self.path == '/v1/toolsets':
             return self._reply(200, type(self).inventory or {'object':'hermes.api_server.toolsets','toolsets':[]})
-        self._reply(200, type(self).caps or {'object':'hermes.api_server.capabilities','features':{'run_submission':True,'runs_idempotency':{'supported':True}},'endpoints':{'session_create':{'method':'POST','path':'/api/sessions'},'runs':{'method':'POST','path':'/v1/runs'}}})
+        self._reply(200, type(self).caps or {'object':'hermes.api_server.capabilities','features':{'chat_completions':True,'run_submission':True,'runs_idempotency':{'supported':True}},'endpoints':{'chat_completions':{'method':'POST','path':'/v1/chat/completions'},'session_create':{'method':'POST','path':'/api/sessions'},'runs':{'method':'POST','path':'/v1/runs'}}})
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('Content-Length',0)))
-        type(self).calls.append(('POST',self.path,self.headers.get('Authorization'),self.headers.get('Idempotency-Key'),json.loads(body or b'{}')))
+        type(self).calls.append(('POST',self.path,self.headers.get('Authorization'),self.headers.get('Idempotency-Key'),json.loads(body or b'{}'),self.headers.get('X-Hermes-Session-Id')))
         if type(self).mode == 'http': return self._reply(500, {'error':'secret-ish'})
         if type(self).mode == 'malformed': return self._reply(202, {'object':'hermes.run'})
         if type(self).mode == 'conflict': return self._reply(409, {'error':'conflict'})
+        if self.path == '/v1/chat/completions': return self._reply(200, type(self).completion)
         if self.path == '/api/sessions': self._reply(201, {'object':'hermes.session','session':{'id':'sess-1'}})
         else:
             key=self.headers.get('Idempotency-Key')
@@ -45,7 +47,7 @@ class ApiTests(unittest.TestCase):
         cls.server=HTTPServer(('127.0.0.1',0),FakeHandler); cls.thread=threading.Thread(target=cls.server.serve_forever,daemon=True); cls.thread.start()
     @classmethod
     def tearDownClass(cls): cls.server.shutdown(); cls.thread.join()
-    def setUp(self): FakeHandler.calls=[]; FakeHandler.idempotency={}; FakeHandler.mode='ok'; FakeHandler.caps=None; self.client=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
+    def setUp(self): FakeHandler.calls=[]; FakeHandler.idempotency={}; FakeHandler.mode='ok'; FakeHandler.caps=None; FakeHandler.inventory=None; FakeHandler.completion={'id':'chatcmpl-1','choices':[{'index':0,'message':{'role':'assistant','content':'The lights are on.'},'finish_reason':'stop'}]}; self.client=HermesApiClient('http://127.0.0.1:%d'%self.server.server_port,'test-secret',1)
     def test_enabled_tool_inventory_accepts_current_api_server_response_shape(self):
         FakeHandler.inventory={'object':'list','platform':'api_server','data':[{'name':'homeassistant','enabled':True,'tools':['ha_call_service','ha_get_state']},{'name':'conduit','enabled':True,'tools':['conduit_call_user']},{'name':'unused','enabled':False,'tools':['danger']}]}
         self.assertEqual(self.client.get_enabled_tool_inventory(),frozenset(('ha_call_service','ha_get_state','conduit_call_user')))
@@ -58,10 +60,29 @@ class ApiTests(unittest.TestCase):
     def test_enabled_tool_inventory_rejects_malformed(self):
         FakeHandler.inventory={'object':'hermes.api_server.toolsets','toolsets':[{'name':'x','enabled':True,'tools':'unknown'}]}
         with self.assertRaises(HermesApiError): self.client.get_enabled_tool_inventory()
+    def test_inline_voice_answer_returns_completion_and_sends_current_request_last(self):
+        history=[{'role':'user','content':'Earlier question'},{'role':'assistant','content':'Earlier answer'}]
+        answer=self.client.answer_voice_request('request-7','Are the lights on?',history)
+        self.assertEqual(answer,'The lights are on.')
+        call=FakeHandler.calls[-1]
+        self.assertEqual(call[1],'/v1/chat/completions')
+        self.assertEqual(call[2],'Bearer test-secret')
+        self.assertNotEqual(call[3],'request-7')
+        self.assertEqual(call[4]['stream'],False)
+        self.assertNotIn('session_id',call[4])
+        self.assertIsNone(call[5])
+        self.assertEqual(call[4]['messages'][-3:],history+[{'role':'user','content':'Are the lights on?'}])
+    def test_inline_voice_answer_rejects_malformed_or_incomplete_completion(self):
+        FakeHandler.completion={'choices':[]}
+        with self.assertRaises(HermesApiError): self.client.answer_voice_request('r','question')
+        FakeHandler.completion={'choices':[{'message':{'content':'partial'},'finish_reason':'length'}]}
+        with self.assertRaises(HermesApiError): self.client.answer_voice_request('r','question')
     def test_authenticates_discovers_caps_and_creates_then_reuses_session(self):
         import tempfile, os
         with tempfile.TemporaryDirectory() as d:
-            p=os.path.join(d,'state.json'); self.assertEqual(self.client.get_capabilities()['object'],'hermes.api_server.capabilities')
+            p=os.path.join(d,'state.json'); capabilities=self.client.get_capabilities()
+            self.assertEqual(capabilities['object'],'hermes.api_server.capabilities')
+            self.assertEqual(capabilities['endpoints']['chat_completions'],{'method':'POST','path':'/v1/chat/completions'})
             self.assertEqual(self.client.get_or_create_voice_session(p),'sess-1'); self.assertEqual(self.client.get_or_create_voice_session(p),'sess-1')
         self.assertTrue(all(c[2]=='Bearer test-secret' for c in FakeHandler.calls))
         self.assertEqual(sum(c[1]=='/api/sessions' for c in FakeHandler.calls),1)

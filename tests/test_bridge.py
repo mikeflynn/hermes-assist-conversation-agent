@@ -24,7 +24,7 @@ class BridgeOutcomeTests(unittest.TestCase):
         client = Mock()
         unknown = CapabilityRegistration('other_capability', 'other', ('different_tool',), 'read_only', (), True)
         for policy in (VoicePolicy((unknown,)),):
-            result = bridge.route_voice_request('please research this', client, policy, '', '')
+            result = bridge.route_voice_request('Please send this to my Voice Requests session: research this.', client, policy, '', '')
             self.assertEqual(result.status, 'unsupported')
         client.get_or_create_voice_session.assert_not_called()
 
@@ -40,9 +40,134 @@ class BridgeOutcomeTests(unittest.TestCase):
         client.get_or_create_voice_session.return_value = 'safe-session'
         client.submit_voice_request.return_value = Mock(status='accepted', session_id='safe-session')
         bridge._HANDOFF_CACHE.clear()
-        result = bridge.route_voice_request('please research this', client, policy, '', '', 'safe-request')
+        result = bridge.route_voice_request('Please send this to Voice Requests: research this.', client, policy, '', '', 'safe-request')
         self.assertEqual(result.status, 'handed_off')
         self.assertEqual(result.session_id, 'safe-session')
+
+    def test_quick_home_assistant_state_question_returns_spoken_answer_without_handoff(self):
+        tools = frozenset(('ha_call_service', 'ha_get_state', 'ha_list_entities', 'ha_list_services', 'conduit_call_user', 'conduit_call_watch', 'conduit_settings', 'conduit_watch_report'))
+        policy = VoicePolicy((
+            CapabilityRegistration('voice_handoff', 'handoff', ('hermes_api',), 'proposal_only', (), True),
+            CapabilityRegistration('home_assistant', 'Home Assistant tools', ('ha_call_service', 'ha_get_state', 'ha_list_entities', 'ha_list_services'), 'direct_tool_access', (), True),
+            CapabilityRegistration('conduit', 'Conduit tools', ('conduit_call_user', 'conduit_call_watch', 'conduit_settings', 'conduit_watch_report'), 'direct_tool_access', (), True),
+        ))
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = tools
+        client.answer_voice_request.return_value = 'The lights are on in the boy’s room.'
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('Are the lights on in the boy’s room?', client, policy, '', '', 'quick-room-state')
+        self.assertEqual(result.status, 'answered')
+        self.assertEqual(result.spoken_reply, 'The lights are on in the boy’s room.')
+        client.answer_voice_request.assert_called_once()
+        client.get_or_create_voice_session.assert_not_called()
+        client.submit_voice_request.assert_not_called()
+
+    def test_clear_home_assistant_command_gets_inline_spoken_result(self):
+        tools = frozenset(('ha_call_service', 'ha_get_state', 'ha_list_entities', 'ha_list_services', 'conduit_call_user', 'conduit_call_watch', 'conduit_settings', 'conduit_watch_report'))
+        policy = VoicePolicy((
+            CapabilityRegistration('voice_handoff', 'handoff', ('hermes_api',), 'proposal_only', (), True),
+            CapabilityRegistration('home_assistant', 'Home Assistant tools', ('ha_call_service', 'ha_get_state', 'ha_list_entities', 'ha_list_services'), 'direct_tool_access', (), True),
+            CapabilityRegistration('conduit', 'Conduit tools', ('conduit_call_user', 'conduit_call_watch', 'conduit_settings', 'conduit_watch_report'), 'direct_tool_access', (), True),
+        ))
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = tools
+        client.answer_voice_request.return_value = 'Done. The hallway lights are off.'
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('Turn off the hallway lights.', client, policy, '', '', 'direct-light-control')
+        self.assertEqual(result.status, 'answered')
+        self.assertEqual(result.spoken_reply, 'Done. The hallway lights are off.')
+        client.answer_voice_request.assert_called_once()
+        client.submit_voice_request.assert_not_called()
+        client.get_or_create_voice_session.assert_not_called()
+
+    def test_unconfirmed_destructive_action_is_routed_to_voice_requests(self):
+        policy = VoicePolicy((CapabilityRegistration('voice_handoff', 'handoff', ('hermes_api',), 'proposal_only', (), True),))
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = frozenset()
+        client.get_or_create_voice_session.return_value = 'voice-session'
+        client.submit_voice_request.return_value = Mock(status='accepted', session_id='voice-session')
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('Delete the old note.', client, policy, '', '', 'delete-action')
+        self.assertEqual(result.status, 'handed_off')
+        client.submit_voice_request.assert_called_once()
+        client.answer_voice_request.assert_not_called()
+
+    def test_explicit_voice_requests_destination_hands_off_instead_of_answering_inline(self):
+        policy = VoicePolicy((CapabilityRegistration('voice_handoff', 'handoff', ('hermes_api',), 'proposal_only', (), True),))
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = frozenset()
+        client.get_or_create_voice_session.return_value = 'voice-session'
+        client.submit_voice_request.return_value = Mock(status='accepted', session_id='voice-session')
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('Please send this answer to my Voice Requests session: are the lights on?', client, policy, '', '', 'explicit-voice-session')
+        self.assertEqual(result.status, 'handed_off')
+        client.submit_voice_request.assert_called_once()
+        client.answer_voice_request.assert_not_called()
+
+    def test_confirmation_request_hands_off_before_inline_execution(self):
+        policy = VoicePolicy((CapabilityRegistration('voice_handoff', 'handoff', ('hermes_api',), 'proposal_only', (), True),))
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = frozenset()
+        client.get_or_create_voice_session.return_value = 'voice-session'
+        client.submit_voice_request.return_value = Mock(status='accepted', session_id='voice-session')
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('Delete the old note, but ask me for confirmation first.', client, policy, '', '', 'confirmation-required')
+        self.assertEqual(result.status, 'handed_off')
+        client.submit_voice_request.assert_called_once()
+        client.answer_voice_request.assert_not_called()
+
+    def test_model_confirmation_marker_hands_off_instead_of_speaking_marker(self):
+        policy = VoicePolicy((CapabilityRegistration('voice_handoff', 'handoff', ('hermes_api',), 'proposal_only', (), True),))
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = frozenset()
+        client.answer_voice_request.return_value = 'HANDOFF_REQUIRED: This request needs your approval.'
+        client.get_or_create_voice_session.return_value = 'voice-session'
+        client.submit_voice_request.return_value = Mock(status='accepted', session_id='voice-session')
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('Please change the smart-home setup.', client, policy, '', '', 'model-marker')
+        self.assertEqual(result.status, 'handed_off')
+        self.assertNotIn('HANDOFF_REQUIRED', result.spoken_reply)
+        client.answer_voice_request.assert_called_once()
+        client.submit_voice_request.assert_called_once()
+
+    def test_informational_email_statement_stays_inline(self):
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = frozenset()
+        client.answer_voice_request.return_value = 'Email is not secure enough for that use.'
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('Email is not secure enough for that use.', client, VoicePolicy(()), '', '', 'email-fact')
+        self.assertEqual(result.status, 'answered')
+        client.answer_voice_request.assert_called_once()
+        client.submit_voice_request.assert_not_called()
+
+    def test_inline_failure_does_not_claim_nothing_happened(self):
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = frozenset()
+        client.answer_voice_request.side_effect = TimeoutError('timed out')
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('Turn off the hallway lights.', client, VoicePolicy(()), '', '', 'inline-timeout')
+        self.assertEqual(result.status, 'unavailable')
+        self.assertIn("can't confirm", result.spoken_reply)
+        client.submit_voice_request.assert_not_called()
+
+    def test_non_confirmation_research_question_gets_inline_answer(self):
+        client = Mock()
+        client.get_capabilities.return_value = {'ok': True}
+        client.get_enabled_tool_inventory.return_value = frozenset()
+        client.answer_voice_request.return_value = 'Here is the concise summary.'
+        bridge._HANDOFF_CACHE.clear()
+        result = bridge.route_voice_request('Please research this and give me a concise summary.', client, VoicePolicy(()), '', '', 'inline-research')
+        self.assertEqual(result.status, 'answered')
+        self.assertEqual(result.spoken_reply, 'Here is the concise summary.')
+        client.submit_voice_request.assert_not_called()
 
     def test_registered_home_assistant_and_conduit_tools_match_live_inventory(self):
         homeassistant = ('ha_call_service', 'ha_get_state', 'ha_list_entities', 'ha_list_services')
@@ -58,7 +183,7 @@ class BridgeOutcomeTests(unittest.TestCase):
         client.get_or_create_voice_session.return_value = 'voice-session'
         client.submit_voice_request.return_value = Mock(status='accepted', session_id='voice-session')
         bridge._HANDOFF_CACHE.clear()
-        result = bridge.route_voice_request('please check my home', client, policy, '', '', 'approved-tools')
+        result = bridge.route_voice_request('Please send this to Voice Requests: check my home.', client, policy, '', '', 'approved-tools')
         self.assertEqual(result.status, 'handed_off')
         self.assertEqual(result.session_id, 'voice-session')
         client.submit_voice_request.assert_called_once()
@@ -70,7 +195,7 @@ class BridgeOutcomeTests(unittest.TestCase):
         client.get_or_create_voice_session.return_value = 'safe-session'
         client.submit_voice_request.return_value = Mock(status='accepted', session_id='safe-session')
         bridge._HANDOFF_CACHE.clear()
-        result = bridge.route_voice_request('please research this', client, VoicePolicy(()), '', '', 'empty-registry-safe')
+        result = bridge.route_voice_request('Please send this to Voice Requests: research this.', client, VoicePolicy(()), '', '', 'empty-registry-safe')
         self.assertEqual(result.status, 'handed_off')
         client.submit_voice_request.assert_called_once()
 
@@ -79,7 +204,7 @@ class BridgeOutcomeTests(unittest.TestCase):
         client = Mock()
         client.get_enabled_tool_inventory.return_value = frozenset(('unregistered_tool',))
         bridge._HANDOFF_CACHE.clear()
-        result = bridge.route_voice_request('please research this', client, policy, '', '', 'inventory-mismatch')
+        result = bridge.route_voice_request('Please send this to Voice Requests: research this.', client, policy, '', '', 'inventory-mismatch')
         self.assertNotEqual(result.status, 'handed_off')
         client.submit_voice_request.assert_not_called()
 
@@ -106,10 +231,21 @@ class BridgeOutcomeTests(unittest.TestCase):
         client.get_or_create_voice_session.return_value = 'sess-context'
         client.submit_voice_request.return_value = Mock(status='accepted', session_id='sess-context')
         bridge._HANDOFF_CACHE.clear()
-        bridge.route_voice_request('current utterance', client, VoicePolicy(()), '', '', 'context-current', 'old history')
+        bridge.route_voice_request('Please send this to Voice Requests: current utterance.', client, VoicePolicy(()), '', '', 'context-current', 'old history')
         args = client.submit_voice_request.call_args[0]
-        self.assertEqual(args[2], 'current utterance')
+        self.assertEqual(args[2], 'Please send this to Voice Requests: current utterance.')
         self.assertIn('current utterance', args[3]['history'])
+
+    def test_inline_chat_history_preserves_roles_and_excludes_current_turn(self):
+        data = {'chat_log': {'content': [
+            {'role': 'user', 'content': 'Earlier question'},
+            {'role': 'assistant', 'content': [{'text': 'Earlier answer'}]},
+            {'role': 'user', 'content': 'Current question'},
+        ]}}
+        self.assertEqual(bridge.format_chat_history(data, 'Current question'), [
+            {'role': 'user', 'content': 'Earlier question'},
+            {'role': 'assistant', 'content': 'Earlier answer'},
+        ])
 
     def test_history_trimming_keeps_current_utterance(self):
         old = bridge.MAX_HISTORY_MESSAGES

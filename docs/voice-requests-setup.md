@@ -30,12 +30,21 @@ Set these only in the bridge service's private environment or a secret manager; 
 
 Do not set `HERMES_ASSIST_TOOLSETS` for this API handoff; a non-empty legacy local-agent selection is treated as unsafe and disables the API client. Do not place secrets in command-line arguments, shell history, source control, or diagnostic output.
 
+## Voice routing behavior
+
+- Cached calendar, Things, and news briefs keep their existing read-only path.
+- Other ordinary questions, research requests, and clear simple device commands use `POST /v1/chat/completions` synchronously. The bridge returns the answer directly to Home Assistant Assist for speech; answer length alone does not trigger a handoff.
+- The persistent **Voice Requests** session is used when the user explicitly directs a request/response there, asks for confirmation before an action, or requests an action the bridge classifies as confirmation-sensitive (for example destructive, financial, external-message, broad-setting, or resource-write work). Those requests use the asynchronous run/handoff path.
+- The direct answer call is checked against the same authenticated enabled-tool inventory and the exact voice registry before it runs. Only registered tools are available to Hermes. The registry grants tool access but does not enforce per-call approval; the bridge's confirmation routing is a conservative classifier plus model instruction, not a general approval sandbox.
+- Ordinary `/v1/chat/completions` turns do not target the pinned **Voice Requests** session. Hermes may record them according to its normal API chat-session behavior; this is separate from the dedicated handoff session.
+- The handoff marker is transport-only and must never be spoken as the final answer. A handoff is reported only after the Voice Requests run is accepted.
+
 ## Verify without broadening access
 
 1. Confirm the bridge service's `PATH`, active `HERMES_HOME`/profile, and private environment without displaying secrets.
 2. Run the two read-only config lookups above in that same service environment. Confirm `platform_toolsets.api_server` is exactly `["no_mcp"]` (no additions) and the server is enabled only as intended.
-3. Confirm the endpoint is loopback-only and authenticated. Use a read-only health/capability/inventory check; do not invoke approval-gated tools.
-4. Verify enabled API tool inventory exactly matches the optional registry before using the voice handoff. Empty policy means no tools are permitted.
-5. Test API-down and unsupported requests; they must report no action was started. Confirm session visibility/continuation and Desktop approval behavior before considering the capability-plan exit gate satisfied.
+3. Confirm the endpoint is loopback-only and authenticated. Use a read-only health/capability/inventory check; confirm the advertised `/v1/chat/completions`, `/v1/runs`, and session endpoints before testing. Do not invoke approval-gated tools.
+4. Verify enabled API tool inventory exactly matches the optional registry before using direct voice tools or the handoff. Empty policy means no tools are permitted.
+5. Test a read-only inline voice question and confirm its reply is returned directly without submitting to the pinned Voice Requests session. Test explicit handoff routing separately. Confirm session visibility/continuation and Desktop approval behavior before considering the capability-plan exit gate satisfied.
 
 If there is no already-running safe API server, stop here. Do not enable/configure/start it or create credentials as part of this repository change. The live/Desktop compatibility gate remains pending explicit operator setup and authorization.
