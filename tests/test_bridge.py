@@ -172,6 +172,8 @@ class BridgeOutcomeTests(unittest.TestCase):
         self.assertIn('web_search', instructions)
         self.assertIn('current or time-sensitive', instructions)
         self.assertIn('source', instructions.lower())
+        self.assertIn('timezone', instructions.lower())
+        self.assertIn('do not infer or shift calendar dates', instructions.lower())
         client.submit_voice_request.assert_not_called()
 
     def test_non_confirmation_research_question_gets_inline_answer(self):
