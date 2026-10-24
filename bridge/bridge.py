@@ -354,9 +354,15 @@ def derive_request_id(conversation_id: str, text: str, history: str) -> str:
 
 def _cached_brief(text: str, calendar_path: str, things_path: str, news_path: str) -> VoiceOutcome | None:
     lowered = text.lower()
-    if any(word in lowered for word in ("calendar", "schedule", "event")):
+    asks_calendar = any(word in lowered for word in ("calendar", "schedule", "event"))
+    asks_things = any(word in lowered for word in ("task", "todo", "to-do", "things", "need to do"))
+    # A multi-part briefing needs the model to combine and summarize sources;
+    # returning one cached file verbatim bypasses the rest of the requested answer.
+    if asks_calendar and asks_things:
+        return None
+    if asks_calendar:
         path = calendar_path
-    elif any(word in lowered for word in ("task", "todo", "to-do", "things", "need to do")):
+    elif asks_things:
         path = things_path
     elif any(word in lowered for word in ("news", "cybersecurity", "apple updates", "morning brief")):
         path = news_path

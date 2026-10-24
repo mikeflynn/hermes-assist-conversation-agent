@@ -6,6 +6,23 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 class BridgeOutcomeTests(unittest.TestCase):
+    def test_combined_morning_brief_uses_model_instead_of_returning_raw_calendar(self):
+        with TemporaryDirectory() as directory:
+            calendar = Path(directory) / 'calendar.md'
+            things = Path(directory) / 'things.md'
+            calendar.write_text('Raw calendar dump')
+            things.write_text('Priority task dump')
+            client = Mock()
+            client.get_capabilities.return_value = {'ok': True}
+            client.get_enabled_tool_inventory.return_value = frozenset()
+            client.answer_voice_request.return_value = 'Good morning. Here is your concise schedule and top priorities. Anything else?'
+            prompt = ('Say a very short welcome and mention configuring the office. If it is in the morning, '
+                      'give a rundown of his schedule for the day and a list of priority Things to do items. '
+                      'Close by asking if there is anything else you can do to help.')
+            result = bridge.route_voice_request(prompt, client, VoicePolicy(()), str(calendar), str(things), request_id='morning-brief')
+            self.assertEqual(result.spoken_reply, client.answer_voice_request.return_value)
+            client.answer_voice_request.assert_called_once()
+
     def test_cached_calendar_and_things_requests_do_not_call_api(self):
         with TemporaryDirectory() as directory:
             calendar = Path(directory) / 'calendar.md'
